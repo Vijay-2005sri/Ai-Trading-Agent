@@ -1,0 +1,24 @@
+MetaTrader5
+pandas
+numpy
+scikit-learn
+arch             # For GARCH (if still used by Quant Agent)
+ta               # Technical Analysis Library
+chromadb         # RAG Vector Database
+langchain        # Agent orchestration
+langchain-openai # LLM integration
+langchain-anthropic
+langchain-community
+langgraph        # Multi-Agent Workflow
+duckduckgo-search # Web search tool
+tavily-python    # Better Web Search API
+transformers     # FinBERT and Time-Series
+torch            # PyTorch backend for Transformers/DRL
+stable-baselines3 # DRL algorithms
+finrl            # Financial Reinforcement Learning wrapper
+python-dotenv
+pyyaml
+rich             # Terminal Dashboard
+schedule
+pydantic         # Structured output parsing
+sentence-transformers

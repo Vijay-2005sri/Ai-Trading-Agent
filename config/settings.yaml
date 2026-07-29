@@ -1,0 +1,68 @@
+# Trading Settings
+broker:
+  demo_mode: true
+  symbols:
+    # Forex
+    - EURUSD
+    - GBPUSD
+    - USDJPY
+    - AUDUSD
+    # Commodities
+    - XAUUSD    # Gold
+    - XAGUSD    # Silver
+    - USOIL     # Crude Oil
+    # Crypto (if available on XM)
+    - BTCUSD
+    - ETHUSD
+  timeframe: H4   # LLM Brain runs on 4-Hour timeframe
+
+# AI / Brain Settings
+llm:
+  provider: openai  # openai, anthropic, or gemini
+  model_name: gpt-4o
+  temperature: 0.1
+
+# =============================================================================
+# RISK MANAGEMENT — STRICT, NON-NEGOTIABLE RULES
+# =============================================================================
+risk:
+  # --- Per-Trade Risk ---
+  risk_per_trade_default: 0.02       # 2% when capital <= $2000
+  risk_per_trade_high_capital: 0.015  # 1.5% when capital > $2000
+  high_capital_threshold: 2000        # Dollar threshold to switch risk %
+
+  # --- Max Drawdown ---
+  max_drawdown_from_peak: 0.05       # 5% max drawdown from equity peak → HALT ALL TRADING
+  daily_drawdown_reduce: 0.025       # 2.5% daily DD → reduce position sizes by 50%
+  daily_drawdown_halt: 0.04          # 4% daily DD → halt trading for the rest of the day
+
+  # --- Trade Limits ---
+  max_trades_default: 2              # Default: max 2 trades per day (sniper mode)
+  max_trades_trending: 3             # If market is strongly trending (ADX>30 + high confidence) → allow 3rd trade
+  trending_confidence_threshold: 80  # Minimum confidence to unlock the 3rd trade
+  min_confidence_to_trade: 70        # Below 70% confidence → no trade at all
+
+  # --- Position Sizing ---
+  max_open_positions: 3              # Never more than 3 positions open simultaneously
+  max_single_position_pct: 0.15      # No single position > 15% of equity
+  max_total_exposure_pct: 0.40       # Total exposure never exceeds 40% of equity
+
+  # --- Mandatory Rules ---
+  require_stop_loss: true            # Every trade MUST have a stop loss. NO EXCEPTIONS.
+  require_take_profit: true          # Every trade MUST have a take profit.
+  min_risk_reward: 1.5               # Minimum Risk:Reward ratio to accept a trade
+
+  # --- Correlation Protection ---
+  max_correlated_positions: 2        # Max 2 positions in highly correlated pairs
+  correlation_threshold: 0.7         # Pairs with > 0.7 correlation are considered "correlated"
+
+# RAG Settings
+rag:
+  db_path: "rag_system/chroma_db"
+  chunk_size: 1000
+  chunk_overlap: 100
+
+# Strategy Settings
+strategy:
+  min_confidence: 70
+  trending_adx_threshold: 30
