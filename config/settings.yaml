@@ -18,8 +18,8 @@ broker:
 
 # AI / Brain Settings
 llm:
-  provider: openai  # openai, anthropic, or gemini
-  model_name: gpt-4o
+  provider: deepseek  # deepseek, groq, gemini, or openrouter
+  model_name: deepseek-chat
   temperature: 0.1
 
 # =============================================================================

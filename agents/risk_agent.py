@@ -279,6 +279,14 @@ class RiskAgent:
         lot_size = risk_amount / (risk_in_pips * pip_value) if (risk_in_pips * pip_value) > 0 else 0
         lot_size = round(max(0.01, lot_size), 2)  # Min 0.01 lots (micro lot)
 
+        # AGGRESSIVE MODE: Strong trend or high confidence (>= 90%)
+        if is_trending or confidence >= 90:
+            # Boost the lot size for high probability setups
+            if lot_size < 0.05:
+                lot_size = 0.05
+            elif lot_size > 0.1:
+                lot_size = 0.1
+
         # Check max single position size
         position_value = lot_size * 100000 * entry_price  # Approximate
         if position_value > equity * self.max_single_pct:

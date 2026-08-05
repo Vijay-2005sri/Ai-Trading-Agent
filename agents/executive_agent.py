@@ -16,11 +16,11 @@ class ExecutiveAgent:
     def __init__(self, provider="openai"):
         self.provider = provider
         # Initialize the LLM (The "Brain")
-        if self.provider == "openai":
-            api_key = os.getenv("OPENAI_API_KEY")
-            self.llm = ChatOpenAI(api_key=api_key, model="gpt-4o", temperature=0.1)
+        if self.provider == "deepseek":
+            api_key = os.getenv("DEEPSEEK_API_KEY")
+            self.llm = ChatOpenAI(api_key=api_key, base_url="https://api.deepseek.com", model="deepseek-chat", temperature=0.1)
         else:
-            raise NotImplementedError("Only OpenAI is currently configured in this stub.")
+            raise NotImplementedError("Only DeepSeek is currently configured in this stub.")
             
         # We enforce the output to be JSON matching the TradeDecision schema
         self.structured_llm = self.llm.with_structured_output(TradeDecision)
