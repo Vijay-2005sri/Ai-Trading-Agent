@@ -1,0 +1,101 @@
+{
+  "_comment": "Strategy Registry — Only strategies listed here with status LIVE will be loaded by strategy_master.py. The count grows cumulatively as new strategies are approved.",
+  "strategies": {
+    "SMC_Liquidity_Sweep": {
+      "version": "1.0",
+      "status": "LIVE",
+      "file": "smc_concepts.py",
+      "class": "SMCStrategy",
+      "category": "Smart Money & Institutional",
+      "added_date": "2026-08-01"
+    },
+    "ICT_Silver_Bullet": {
+      "version": "1.0",
+      "status": "LIVE",
+      "file": "ict_concepts.py",
+      "class": "ICTSilverBulletStrategy",
+      "category": "Smart Money & Institutional",
+      "added_date": "2026-08-01"
+    },
+    "ICT_OTE": {
+      "version": "1.0",
+      "status": "LIVE",
+      "file": "ict_concepts.py",
+      "class": "ICTOptimalTradeEntry",
+      "category": "Smart Money & Institutional",
+      "added_date": "2026-08-01"
+    },
+    "Wyckoff_Spring_Upthrust": {
+      "version": "1.0",
+      "status": "LIVE",
+      "file": "wyckoff_method.py",
+      "class": "WyckoffStrategy",
+      "category": "Smart Money & Institutional",
+      "added_date": "2026-08-01"
+    },
+    "EMA_Crossover": {
+      "version": "1.0",
+      "status": "LIVE",
+      "file": "trend_following.py",
+      "class": "EMACrossoverStrategy",
+      "category": "Trend Following",
+      "added_date": "2026-08-01"
+    },
+    "Bollinger_Breakout": {
+      "version": "1.0",
+      "status": "LIVE",
+      "file": "trend_following.py",
+      "class": "BreakoutStrategy",
+      "category": "Trend Following",
+      "added_date": "2026-08-01"
+    },
+    "RSI_Mean_Reversion": {
+      "version": "1.0",
+      "status": "LIVE",
+      "file": "mean_reversion.py",
+      "class": "RSIMeanReversionStrategy",
+      "category": "Mean Reversion",
+      "added_date": "2026-08-01"
+    },
+    "Supply_Demand_Zone": {
+      "version": "1.0",
+      "status": "LIVE",
+      "file": "mean_reversion.py",
+      "class": "SupplyDemandZoneStrategy",
+      "category": "Mean Reversion",
+      "added_date": "2026-08-01"
+    },
+    "Fibonacci_Golden_Zone": {
+      "version": "1.0",
+      "status": "LIVE",
+      "file": "harmonic_fibonacci.py",
+      "class": "FibonacciRetracementStrategy",
+      "category": "Fibonacci & Harmonics",
+      "added_date": "2026-08-01"
+    },
+    "VWAP_Scalp": {
+      "version": "1.0",
+      "status": "LIVE",
+      "file": "scalping_price_action.py",
+      "class": "VWAPScalpingStrategy",
+      "category": "Scalping & Price Action",
+      "added_date": "2026-08-01"
+    },
+    "Engulfing_Candle": {
+      "version": "1.0",
+      "status": "LIVE",
+      "file": "scalping_price_action.py",
+      "class": "EngulfingCandleStrategy",
+      "category": "Scalping & Price Action",
+      "added_date": "2026-08-01"
+    },
+    "News_Spike_Fade": {
+      "version": "1.0",
+      "status": "LIVE",
+      "file": "scalping_price_action.py",
+      "class": "NewsSpikeFadeStrategy",
+      "category": "Scalping & Price Action",
+      "added_date": "2026-08-01"
+    }
+  }
+}
