@@ -52,10 +52,11 @@ import sys
 import time
 import json
 import yaml
-import schedule
 from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 # ── Load environment ────────────────────────────────────────────────────────
 load_dotenv()
@@ -64,8 +65,11 @@ load_dotenv()
 from data_feeds.mt5_market_data import MT5DataFetcher
 from data_feeds.web_search import WebSearchAgent
 from data_feeds.news_sentiment import NewsSentimentAnalyzer
+from data_feeds.economic_calendar import EconomicCalendar
 
 from strategy_library.strategy_master import run_all_strategies, get_strategy_summary
+from data.observation_logger import ObservationLogger
+from monitoring.performance_monitor import PerformanceMonitor
 
 from agents.llm_provider import LLMProvider, TradeDecision
 from agents.risk_agent import RiskAgent, TradeRecord
@@ -101,15 +105,17 @@ class TradingBrain:
     """
 
     SYSTEM_CONTEXT = (
-        "You are the Executive AI of a quantitative hedge fund. "
-        "You receive verified data from three sources:\n"
-        "  1. QUANT REPORT: Technical signals from 12 trading strategies.\n"
-        "  2. FUNDAMENTAL REPORT: Live news headlines + FinBERT sentiment scores.\n"
-        "  3. STRATEGY KNOWLEDGE: Loaded strategy descriptions.\n"
+        "You are the Executive AI of a quantitative hedge fund. You operate as a specialized Trading Gem.\n"
+        "You receive verified data from four sources:\n"
+        "  1. TRADING CONCEPTS KNOWLEDGE: Your fundamental understanding of market structure.\n"
+        "  2. QUANT REPORT: Technical signals from our trading strategies.\n"
+        "  3. FUNDAMENTAL REPORT: Live news headlines + FinBERT sentiment scores.\n"
+        "  4. STRATEGY KNOWLEDGE: Summary of how the strategies operate.\n"
         "The RAG context above this message is your SOURCE OF TRUTH. "
         "It contains verified historical trades and news from our database. "
         "Rules:\n"
-        "  - If strategies strongly disagree → HOLD.\n"
+        "  - Actively apply your TRADING CONCEPTS KNOWLEDGE to evaluate if the QUANT REPORT makes logical sense.\n"
+        "  - If strategies strongly disagree or the setup invalidates the concepts → HOLD.\n"
         "  - If RAG win rate < 50% → prefer HOLD or very low lot size.\n"
         "  - If cold-start (no RAG history) → HOLD (safety first).\n"
         "  - Always prioritize capital preservation over profit."
@@ -123,6 +129,7 @@ class TradingBrain:
         quant_report: str,
         fundamental_report: str,
         strategy_knowledge: str,
+        concept_knowledge: str,
         rag_context: str,
         pair: str,
     ) -> TradeDecision:
@@ -133,6 +140,7 @@ class TradingBrain:
         base_prompt = (
             f"{self.SYSTEM_CONTEXT}\n\n"
             f"=== PAIR: {pair} ===\n\n"
+            f"--- TRADING CONCEPTS KNOWLEDGE ---\n{concept_knowledge}\n\n"
             f"--- QUANT REPORT (Strategy Signals) ---\n{quant_report}\n\n"
             f"--- FUNDAMENTAL REPORT (News & Sentiment) ---\n{fundamental_report}\n\n"
             f"--- STRATEGY KNOWLEDGE ---\n{strategy_knowledge}\n\n"
@@ -196,8 +204,11 @@ class TradingEngine:
         )
         self.web_search = WebSearchAgent(use_tavily=bool(os.getenv("TAVILY_API_KEY")))
         self.sentiment_analyzer = None  # Lazy load — FinBERT is heavy
+        self.calendar = EconomicCalendar()
+        self.calendar.fetch_calendar()
         print("  ✅ MT5 Data Fetcher ready")
         print("  ✅ Web Search Agent ready")
+        print("  ✅ Economic Calendar loaded")
         print("  ⏳ FinBERT will load on first news analysis")
 
         # ── RAG Memory System ───────────────────────────────────────────────
@@ -209,9 +220,18 @@ class TradingEngine:
         self.validator = GroundingValidator()
         print("  ✅ Grounding Validator ready (hallucination guard active)")
 
+        # ── Load Trading Concepts (The "Gem" Knowledge) ──────────────────────
+        print("\n[5/6] Loading Trading Concepts Knowledge...")
+        self.concept_knowledge = self._load_trading_concepts()
+        self.strategy_knowledge = get_strategy_summary()
+
         # ── LLM Provider ────────────────────────────────────────────────────
         print("\n[3/6] Initializing LLM Providers...")
         self.llm_provider = LLMProvider()
+
+        # ── Observation Logger & Monitor ─────────────────────────────────────
+        self.observation_logger = ObservationLogger()
+        self.performance_monitor = PerformanceMonitor()
 
         # ── Brain ────────────────────────────────────────────────────────────
         print("\n[4/6] Initializing Trading Brain...")
@@ -234,12 +254,13 @@ class TradingEngine:
         )
         print("  ✅ Order Executor ready")
 
-        # ── Strategy Knowledge ───────────────────────────────────────────────
-        self.strategy_knowledge = get_strategy_summary()
-
         # ── Trade Log ────────────────────────────────────────────────────────
         self.trade_log_path = Path(__file__).parent / "trade_log.json"
         self.trade_log      = self._load_trade_log()
+
+        # ── Thread Safety ────────────────────────────────────────────────────
+        self._lock = threading.Lock()  # Protects RAG DB, trade_log, risk_agent
+        self._max_workers = min(4, len(self.symbols))  # Parallel threads
 
         # ── Summary ──────────────────────────────────────────────────────────
         rag_stats = self.rag.get_db_stats()
@@ -252,25 +273,40 @@ class TradingEngine:
         print(f"  🛡️  Grounding Validator: ACTIVE")
         print("=" * 65 + "\n")
 
+    def _load_trading_concepts(self) -> str:
+        """Loads the foundational trading concepts for the LLM Gem."""
+        concept_path = Path(__file__).parent / "trading_concepts" / "cheat_sheet.md"
+        rules_path = Path(__file__).parent / "trading_concepts" / "next_action_rules.md"
+        relationships_path = Path(__file__).parent / "trading_concepts" / "concept_relationships.md"
+        fundamental_path = Path(__file__).parent / "trading_concepts" / "fundamental_news_events.md"
+        
+        knowledge = ""
+        if concept_path.exists():
+            knowledge += concept_path.read_text(encoding="utf-8")
+        if rules_path.exists():
+            knowledge += "\n\n" + rules_path.read_text(encoding="utf-8")
+        if relationships_path.exists():
+            knowledge += "\n\n" + relationships_path.read_text(encoding="utf-8")
+        if fundamental_path.exists():
+            knowledge += "\n\n" + fundamental_path.read_text(encoding="utf-8")
+            
+        if not knowledge:
+            print("  ⚠️ Trading concepts not found. The Brain will run without fundamental concept knowledge.")
+            
+        return knowledge
+
     # =======================================================================
     # CORE CYCLE
     # =======================================================================
 
-    def run_cycle(self):
+    def run_cycle(self, is_high_impact: bool = False):
         """
         One full analysis cycle. Called every 15 minutes.
-
-        Steps:
-          1. Gather fundamental data (news + sentiment)
-          2. For each symbol:
-              a. Fetch MT5 market data
-              b. Run all 12 strategies
-              c. Query RAG for verified trade + news history
-              d. Ask Brain (LLM) for a grounded decision
               e. Run Grounding Validator (deterministic hallucination check)
               f. Risk Agent approval
-              g. Execute trade via MT5
-              h. Save news and outcomes to RAG DB
+              g. High Conviction Hold check (for cheap commodities)
+              h. Execute trade via MT5
+              i. Save news and outcomes to RAG DB
         """
         cycle_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(f"\n{'─' * 65}")
@@ -278,54 +314,86 @@ class TradingEngine:
         print(f"{'─' * 65}")
 
         # ── STEP 1: Fundamental Data ──────────────────────────────────────
-        print("\n  [STEP 1] 🌐 Gathering global news & sentiment...")
-        news_items, fundamental_report = self._gather_fundamentals()
+        print(f"\n  [STEP 1] 🌐 Gathering global news & sentiment... (High Impact: {is_high_impact})")
+        news_items, fundamental_report = self._gather_fundamentals(is_high_impact)
 
         # Save news events to RAG memory for future cycles
         if news_items:
-            self.rag.memorize_news(
-                news_items=news_items,
-                pair="GLOBAL",  # Global news affects all pairs
-                market_reaction="Recorded at cycle start — market reaction TBD"
-            )
+            with self._lock:
+                self.rag.memorize_news(
+                    news_items=news_items,
+                    pair="GLOBAL",  # Global news affects all pairs
+                    market_reaction="Recorded at cycle start — market reaction TBD"
+                )
 
-        # ── STEP 2: Scan each symbol ──────────────────────────────────────
-        for symbol in self.symbols:
-            print(f"\n  {'═' * 60}")
-            print(f"  [STEP 2] 📈 Analyzing {symbol}...")
+        # ── STEP 2: Scan each symbol IN PARALLEL ─────────────────────────
+        print(f"\n  [STEP 2] 🚀 Parallel scan: {len(self.symbols)} symbols "
+              f"across {self._max_workers} threads...")
 
-            # ── Get market data from MT5 ────────────────────────────────
-            try:
-                import MetaTrader5 as mt5
-                df = self.mt5_fetcher.get_historical_data(symbol, mt5.TIMEFRAME_H1, count=200)
-                if df is None or df.empty:
-                    print(f"    ⚠️  No data for {symbol}. Skipping.")
-                    continue
-            except Exception as e:
-                print(f"    ⚠️  MT5 data error for {symbol}: {e}. Skipping.")
-                continue
+        with ThreadPoolExecutor(max_workers=self._max_workers) as executor:
+            futures = {
+                executor.submit(
+                    self._analyze_symbol, symbol, fundamental_report
+                ): symbol
+                for symbol in self.symbols
+            }
 
-            # ── Run all 12 strategies ────────────────────────────────────
-            print(f"    [2a] Running all strategies on {symbol}...")
-            strategy_signals = run_all_strategies(df, pair=symbol)
+            for future in as_completed(futures):
+                symbol = futures[future]
+                try:
+                    future.result()  # Raise any exception from the thread
+                except Exception as e:
+                    print(f"    ❌ Unhandled error analyzing {symbol}: {e}")
 
-            if not strategy_signals:
-                print(f"    📭 No signals from any strategy for {symbol}.")
-                continue
+        print(f"\n{'─' * 65}")
+        print(f"  ✅ CYCLE COMPLETE: {datetime.now().strftime('%H:%M:%S')}")
+        print(f"{'─' * 65}")
 
-            top_signal = strategy_signals[0]
-            print(
-                f"    📊 {len(strategy_signals)} signal(s) | Top: "
-                f"{top_signal['strategy']} ({top_signal['confidence']}% conf)"
-            )
-            quant_report = self._format_quant_report(strategy_signals)
+    # =======================================================================
+    # PER-SYMBOL ANALYSIS (runs inside a thread)
+    # =======================================================================
 
-            # ── STEP 3: RAG Memory Query ─────────────────────────────────
-            print(f"    [2b] 🧠 Querying RAG memory for {symbol}...")
-            market_context = (
-                f"Price action context: {top_signal.get('reasoning', '')[:200]}"
-            )
+    def _analyze_symbol(self, symbol: str, fundamental_report: str):
+        """
+        Full analysis pipeline for a single symbol.
+        Thread-safe: uses self._lock for shared resources.
+        """
+        print(f"\n  {'═' * 60}")
+        print(f"  [THREAD] 📈 Analyzing {symbol}...")
 
+        # ── Get market data from MT5 ────────────────────────────────
+        try:
+            import MetaTrader5 as mt5
+            df = self.mt5_fetcher.get_historical_data(symbol, mt5.TIMEFRAME_H1, count=200)
+            if df is None or df.empty:
+                print(f"    ⚠️  No data for {symbol}. Skipping.")
+                return
+        except Exception as e:
+            print(f"    ⚠️  MT5 data error for {symbol}: {e}. Skipping.")
+            return
+
+        # ── Run all strategies (12+) ─────────────────────────────────
+        print(f"    [2a] Running all strategies on {symbol}...")
+        strategy_signals = run_all_strategies(df, pair=symbol)
+
+        if not strategy_signals:
+            print(f"    📭 No signals from any strategy for {symbol}.")
+            return
+
+        top_signal = strategy_signals[0]
+        print(
+            f"    📊 {len(strategy_signals)} signal(s) | Top: "
+            f"{top_signal['strategy']} ({top_signal['confidence']}% conf)"
+        )
+        quant_report = self._format_quant_report(strategy_signals)
+
+        # ── STEP 3: RAG Memory Query (thread-safe) ────────────────────
+        print(f"    [2b] 🧠 Querying RAG memory for {symbol}...")
+        market_context = (
+            f"Price action context: {top_signal.get('reasoning', '')[:200]}"
+        )
+
+        with self._lock:
             trade_recall = self.rag.recall_similar_trades(
                 pair=symbol,
                 strategy=top_signal["strategy"],
@@ -344,81 +412,95 @@ class TradingEngine:
                 strategy=top_signal["strategy"]
             )
 
-            # Build the combined grounded context block for LLM
-            rag_context = (
-                f"{trade_recall['summary']}\n\n"
-                f"{news_recall['summary']}\n\n"
-                f"Verified DB win rate for {symbol}/{top_signal['strategy']}: "
-                f"{f'{actual_win_rate*100:.1f}%' if actual_win_rate is not None else 'Insufficient data'}"
-            )
+        # Build the combined grounded context block for LLM
+        rag_context = (
+            f"{trade_recall['summary']}\n\n"
+            f"{news_recall['summary']}\n\n"
+            f"Verified DB win rate for {symbol}/{top_signal['strategy']}: "
+            f"{f'{actual_win_rate*100:.1f}%' if actual_win_rate is not None else 'Insufficient data'}"
+        )
 
-            cold_start = trade_recall.get("is_cold_start", True)
-            print(
-                f"    📚 RAG: {trade_recall['total_found']} trade memories | "
-                f"{news_recall['total_found']} news memories | "
-                f"{'⚠️ COLD START' if cold_start else '✅ History found'}"
-            )
+        cold_start = trade_recall.get("is_cold_start", True)
+        print(
+            f"    📚 RAG: {trade_recall['total_found']} trade memories | "
+            f"{news_recall['total_found']} news memories | "
+            f"{'⚠️ COLD START' if cold_start else '✅ History found'}"
+        )
 
-            # ── STEP 4: Brain (LLM) Decision ─────────────────────────────
-            print(f"    [2c] 🧠 Brain evaluating {symbol} with grounded context...")
-            decision = self.brain.evaluate(
-                quant_report=quant_report,
-                fundamental_report=fundamental_report,
-                strategy_knowledge=self.strategy_knowledge,
-                rag_context=rag_context,
-                pair=symbol,
-            )
+        # ── STEP 4: Brain (LLM) Decision ─────────────────────────────
+        print(f"    [2c] 🧠 Brain evaluating {symbol} with grounded context...")
+        decision = self.brain.evaluate(
+            quant_report=quant_report,
+            fundamental_report=fundamental_report,
+            strategy_knowledge=self.strategy_knowledge,
+            concept_knowledge=self.concept_knowledge,
+            rag_context=rag_context,
+            pair=symbol,
+        )
 
-            print(
-                f"    🧠 Raw decision: {decision.action} {symbol} "
-                f"(Conf: {decision.confidence}% | "
-                f"Hallucination: {decision.hallucination_risk} | "
-                f"RAG sources cited: {decision.rag_sources_cited})"
-            )
+        print(
+            f"    🧠 Raw decision: {decision.action} {symbol} "
+            f"(Conf: {decision.confidence}% | "
+            f"Hallucination: {decision.hallucination_risk} | "
+            f"RAG sources cited: {decision.rag_sources_cited})"
+        )
 
-            # ── STEP 5: Grounding Validator ───────────────────────────────
-            print(f"    [2d] 🛡️  Grounding Validator running...")
-            grounding_result = self.validator.validate(
-                decision=decision,
-                trade_recall=trade_recall,
-                news_recall=news_recall,
-                actual_win_rate=actual_win_rate
-            )
+        # ── STEP 5: Grounding Validator ───────────────────────────────
+        print(f"    [2d] 🛡️  Grounding Validator running...")
+        grounding_result = self.validator.validate(
+            decision=decision,
+            trade_recall=trade_recall,
+            news_recall=news_recall,
+            actual_win_rate=actual_win_rate
+        )
 
-            grounding_log = self.validator.format_log_entry(grounding_result, decision.action)
-            print(
-                f"    🔍 Grounding score: {grounding_result.grounding_score:.2f}/1.00 | "
-                f"Checks passed: {len(grounding_result.checks_passed)} | "
-                f"Failed: {len(grounding_result.checks_failed)}"
-            )
+        grounding_log = self.validator.format_log_entry(grounding_result, decision.action)
+        print(
+            f"    🔍 Grounding score: {grounding_result.grounding_score:.2f}/1.00 | "
+            f"Checks passed: {len(grounding_result.checks_passed)} | "
+            f"Failed: {len(grounding_result.checks_failed)}"
+        )
 
-            if grounding_result.override_to_hold:
-                print(f"    🛡️  GROUNDING OVERRIDE → HOLD")
-                print(f"    📋 Reason: {grounding_result.override_reason[:200]}")
-                decision.action = "HOLD"
+        if grounding_result.override_to_hold:
+            print(f"    🛡️  GROUNDING OVERRIDE → HOLD")
+            print(f"    📋 Reason: {grounding_result.override_reason[:200]}")
+            decision.action = "HOLD"
+            with self._lock:
                 self._log_decision(decision, f"GROUNDING_OVERRIDE: {grounding_result.override_reason[:150]}", grounding_log=grounding_log)
-                continue
+            return
 
-            print(
-                f"    ✅ Grounding passed: {decision.action} {symbol} "
-                f"(Win rate cited: {decision.historical_win_rate:.1%})"
-            )
+        print(
+            f"    ✅ Grounding passed: {decision.action} {symbol} "
+            f"(Win rate cited: {decision.historical_win_rate:.1%})"
+        )
 
-            # ── STEP 6: HOLD → skip ───────────────────────────────────────
-            if decision.action == "HOLD":
-                print(f"    ✋ HOLD — No trade for {symbol}.")
+        # ── STEP 6: HOLD → skip ───────────────────────────────────────
+        if decision.action == "HOLD":
+            print(f"    ✋ HOLD — No trade for {symbol}.")
+            with self._lock:
                 self._log_decision(decision, "HOLD — Brain decided to wait", grounding_log=grounding_log)
-                continue
+                self.observation_logger.log_from_cycle_data(
+                    symbol=symbol,
+                    strategy_signals=strategy_signals,
+                    decision_action=decision.action,
+                    decision_reasoning=decision.reasoning,
+                    decision_confidence=decision.confidence,
+                    grounding_score=grounding_result.grounding_score,
+                    rag_win_rate=actual_win_rate,
+                    timeframe="H1"
+                )
+            return
 
-            # ── STEP 7: Risk Agent ────────────────────────────────────────
-            print(f"    [2e] 🛡️  Risk Agent evaluating...")
+        # ── STEP 7: Risk Agent (thread-safe) ─────────────────────────
+        print(f"    [2e] 🛡️  Risk Agent evaluating...")
 
-            is_trending = any(
-                s["confidence"] >= 80 and "Trend" in s.get("strategy", "")
-                for s in strategy_signals
-            )
-            equity = self.executor.get_account_equity()
+        is_trending = any(
+            s["confidence"] >= 80 and "Trend" in s.get("strategy", "")
+            for s in strategy_signals
+        )
+        equity = self.executor.get_account_equity()
 
+        with self._lock:
             risk_result = self.risk_agent.evaluate_trade(
                 pair=decision.pair,
                 direction=decision.action,
@@ -430,41 +512,51 @@ class TradingEngine:
                 is_trending=is_trending,
             )
 
-            print(f"    🛡️  Risk: {risk_result.reason}")
+        print(f"    🛡️  Risk: {risk_result.reason}")
 
-            if not risk_result.approved:
+        if not risk_result.approved:
+            with self._lock:
                 self._log_decision(
                     decision,
                     f"VETOED by Risk Agent: {risk_result.reason}",
                     grounding_log=grounding_log
                 )
-                continue
+            return
 
-            # ── STEP 8: Execute Trade ─────────────────────────────────────
-            print(
-                f"    [2f] 🚀 EXECUTING: {decision.action} {symbol} "
-                f"| Lots: {risk_result.adjusted_lot_size}"
-            )
+        # ── STEP 7b: High Conviction Hold Check ──────────────────────
+        hold_check = self.risk_agent.check_high_conviction_hold(
+            pair=symbol, confidence=decision.confidence
+        )
+        if hold_check["allow_extended_hold"]:
+            print(f"    {hold_check['reason']}")
 
-            trade_record = TradeRecord(
-                trade_id=f"{symbol}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
-                pair=symbol,
-                direction=decision.action,
-                entry_price=top_signal.get("entry_price", 0),
-                stop_loss=decision.suggested_sl,
-                take_profit=decision.suggested_tp,
-                lot_size=risk_result.adjusted_lot_size,
-                open_time=datetime.now().isoformat(),
-            )
+        # ── STEP 8: Execute Trade ─────────────────────────────────────
+        print(
+            f"    [2f] 🚀 EXECUTING: {decision.action} {symbol} "
+            f"| Lots: {risk_result.adjusted_lot_size}"
+        )
 
-            order_result = self.executor.place_order(trade_record)
+        trade_record = TradeRecord(
+            trade_id=f"{symbol}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+            pair=symbol,
+            direction=decision.action,
+            entry_price=top_signal.get("entry_price", 0),
+            stop_loss=decision.suggested_sl,
+            take_profit=decision.suggested_tp,
+            lot_size=risk_result.adjusted_lot_size,
+            open_time=datetime.now().isoformat(),
+        )
 
+        order_result = self.executor.place_order(trade_record)
+
+        with self._lock:
             if order_result["success"]:
                 self.risk_agent.record_trade_opened(trade_record)
                 self._log_decision(
                     decision,
                     f"EXECUTED [{order_result['mode']}]: Lots={risk_result.adjusted_lot_size} | "
-                    f"Ticket={order_result.get('ticket')}",
+                    f"Ticket={order_result.get('ticket')}"
+                    f"{' | 🔥 HIGH CONVICTION HOLD ENABLED' if hold_check['allow_extended_hold'] else ''}",
                     trade=trade_record,
                     grounding_log=grounding_log
                 )
@@ -477,25 +569,44 @@ class TradingEngine:
                     grounding_log=grounding_log
                 )
 
-        print(f"\n{'─' * 65}")
-        print(f"  ✅ CYCLE COMPLETE: {datetime.now().strftime('%H:%M:%S')}")
-        print(f"{'─' * 65}")
+        # ── STEP 9: Log Observation for Pattern Miner ─────────────────
+        with self._lock:
+            self.observation_logger.log_from_cycle_data(
+                symbol=symbol,
+                strategy_signals=strategy_signals,
+                decision_action=decision.action,
+                decision_reasoning=decision.reasoning,
+                decision_confidence=decision.confidence,
+                grounding_score=grounding_result.grounding_score,
+                rag_win_rate=actual_win_rate,
+                entry_price=top_signal.get("entry_price", 0),
+                stop_loss=decision.suggested_sl,
+                take_profit=decision.suggested_tp,
+                timeframe="H1"
+            )
 
     # =======================================================================
     # HELPERS
     # =======================================================================
 
-    def _gather_fundamentals(self) -> tuple[list[dict], str]:
+    def _gather_fundamentals(self, is_high_impact: bool = False) -> tuple[list[dict], str]:
         """
         Search web for news and run FinBERT sentiment analysis.
         Returns: (news_items_with_sentiment, formatted_report_string)
         """
+        # Optimize API credits: Only use premium Tavily search during high impact news
+        if is_high_impact:
+            self.web_search.use_tavily = bool(os.getenv("TAVILY_API_KEY"))
+        else:
+            self.web_search.use_tavily = False
+
+        # If not high impact, limit to just 1 general query to save duckduckgo bandwidth too
         queries = [
             "forex market news today",
             "Federal Reserve interest rate decision",
             "gold price movement today",
             "Bitcoin cryptocurrency market today",
-        ]
+        ] if is_high_impact else ["forex and crypto market news today"]
 
         all_news: list[dict] = []
         for q in queries:
@@ -534,7 +645,15 @@ class TradingEngine:
             [f"  - {n.get('title', 'N/A')} [{n.get('sentiment', '?').upper()}]"
              for n in all_news[:8]]
         )
-        report = (
+        
+        upcoming_events = self.calendar.get_upcoming_high_impact_events(minutes_ahead=60)
+        calendar_bias = self.calendar.generate_pre_event_bias(upcoming_events)
+        
+        report = ""
+        if calendar_bias:
+            report += f"{calendar_bias}\n\n"
+            
+        report += (
             f"=== LIVE NEWS HEADLINES ===\n{headlines}\n\n"
             f"=== SENTIMENT ===\n{sentiment_summary}"
         )
@@ -623,6 +742,12 @@ class TradingEngine:
                     )
                 )
                 print(f"  💾 Trade {trade_id} memorized in RAG DB (PnL: ${pnl:.2f})")
+                
+                # Check Strategy Health and Degradation
+                self.performance_monitor.record_trade_outcome(
+                    strategy_name=entry["strategy_used"],
+                    pnl=pnl
+                )
                 break
 
     def _load_trade_log(self) -> list:
@@ -651,19 +776,31 @@ class TradingEngine:
 def main():
     engine = TradingEngine()
 
-    print("\n🔁 Starting trading loop. Cycle interval: 15 minutes.")
+    print("\n🔁 Starting DYNAMIC trading loop.")
+    print("   Normal Mode: 15 minutes | Sniper Mode: 10 seconds")
     print("   Press Ctrl+C to stop.\n")
 
     # Run immediately on startup
-    engine.run_cycle()
-
-    # Schedule to run every 15 minutes
-    schedule.every(15).minutes.do(engine.run_cycle)
+    engine.run_cycle(is_high_impact=False)
+    last_normal_cycle = time.time()
 
     try:
         while True:
-            schedule.run_pending()
-            time.sleep(1)
+            # Check if we are near a high-impact news event
+            is_sniper = engine.calendar.is_news_sniper_window()
+            now = time.time()
+            
+            if is_sniper:
+                print("\n⚡ HIGH FREQUENCY SNIPER MODE ACTIVE! (High-Impact News Imminent)")
+                engine.run_cycle(is_high_impact=True)
+                time.sleep(10)
+                last_normal_cycle = time.time() # Reset normal timer so it doesn't trigger immediately after sniper ends
+            else:
+                # Normal 15-minute loop
+                if now - last_normal_cycle >= 15 * 60:
+                    engine.run_cycle(is_high_impact=False)
+                    last_normal_cycle = time.time()
+                time.sleep(1)  # Sleep briefly to prevent 100% CPU usage
     except KeyboardInterrupt:
         print("\n\n🛑 Shutting down gracefully...")
         print("   Open positions are NOT closed (SL/TP remain active at broker).")
