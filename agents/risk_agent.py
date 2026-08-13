@@ -20,6 +20,7 @@ Rules Enforced:
 
 import json
 import os
+from pathlib import Path
 from datetime import datetime, date
 from dataclasses import dataclass, field, asdict
 from typing import Optional
@@ -69,6 +70,29 @@ class RiskAgent:
                                                          └───────────────────┘
     """
 
+    # -----------------------------------------------------------------
+    # SYMBOL-SPECIFIC RISK OVERRIDES
+    # -----------------------------------------------------------------
+    # These override the default/high-capital risk percentage for
+    # specific instruments. Silver (XAGUSD) always uses 2% risk
+    # regardless of account size, because its per-pip value is lower.
+    # -----------------------------------------------------------------
+    SYMBOL_RISK_OVERRIDES = {
+        "XAGUSD": 0.02,   # Silver: always 2%, never reduced to 1.5%
+    }
+
+    # -----------------------------------------------------------------
+    # HIGH CONVICTION HOLD — Cheap Commodity Extension
+    # -----------------------------------------------------------------
+    # For instruments with cheap per-pip costs (USOIL, XAGUSD), if
+    # confidence is >= 90%, the system is allowed to hold the position
+    # for up to 1 full day (24 hours) instead of the default intraday
+    # window. This lets strong moves on slow instruments play out.
+    # -----------------------------------------------------------------
+    HIGH_CONVICTION_INSTRUMENTS = {
+        "USOIL":  {"min_confidence": 90, "max_hold_hours": 24},
+    }
+
     def __init__(self, config: dict):
         risk_cfg = config.get("risk", {})
 
@@ -108,6 +132,37 @@ class RiskAgent:
         self.trades_today: list[TradeRecord] = []
         self.open_positions: list[TradeRecord] = []
         self.current_date = date.today()
+        
+        # --- Streak Tracker ---
+        self.streak_file = Path(__file__).parent / "streak_tracker.json"
+        self.consecutive_wins = 0
+        self._load_streak()
+
+    def _load_streak(self):
+        if self.streak_file.exists():
+            try:
+                data = json.loads(self.streak_file.read_text(encoding="utf-8"))
+                self.consecutive_wins = data.get("consecutive_wins", 0)
+                saved_date_str = data.get("current_date")
+                if saved_date_str:
+                    saved_date = date.fromisoformat(saved_date_str)
+                    # If we loaded a date from the past, we handle rollover in evaluate_trade
+                    if saved_date > self.current_date:
+                        self.current_date = saved_date
+                self.start_of_day_equity = data.get("start_of_day_equity", 0.0)
+            except Exception as e:
+                print(f"Failed to load streak tracker: {e}")
+
+    def _save_streak(self):
+        try:
+            data = {
+                "consecutive_wins": self.consecutive_wins,
+                "current_date": self.current_date.isoformat(),
+                "start_of_day_equity": self.start_of_day_equity
+            }
+            self.streak_file.write_text(json.dumps(data, indent=4), encoding="utf-8")
+        except Exception as e:
+            print(f"Failed to save streak tracker: {e}")
 
     # -------------------------------------------------------------------
     # CORE: Evaluate a trade proposal
@@ -129,16 +184,27 @@ class RiskAgent:
         """
         # Reset daily counter if it's a new day
         today = date.today()
-        if today != self.current_date:
+        if today > self.current_date:
+            # Process yesterday's PnL
+            if self.start_of_day_equity > 0:
+                if equity > self.start_of_day_equity:
+                    self.consecutive_wins += 1
+                    print(f"📈 Profitable day yesterday! Streak is now {self.consecutive_wins} days.")
+                elif equity < self.start_of_day_equity:
+                    self.consecutive_wins = 0
+                    print("📉 Loss day yesterday. Streak reset to 0.")
+                    
             self.trades_today = []
             self.start_of_day_equity = equity
             self.current_date = today
+            self._save_streak()
 
         # Update peak equity
         if equity > self.peak_equity:
             self.peak_equity = equity
         if self.start_of_day_equity == 0:
             self.start_of_day_equity = equity
+            self._save_streak()
 
         # -----------------------------------------------------------
         # CHECK 1: Max Drawdown from Peak (5%)
@@ -269,29 +335,30 @@ class RiskAgent:
             )
 
         # -----------------------------------------------------------
-        # ALL CHECKS PASSED → Calculate exact lot size
         # -----------------------------------------------------------
-        risk_pct = self._get_risk_pct(equity)
-        risk_amount = equity * risk_pct * size_multiplier
-        risk_in_pips = risk_distance / 0.0001 if "JPY" not in pair else risk_distance / 0.01
-
-        # Lot size = (Risk Amount) / (Risk in Pips × Pip Value)
-        lot_size = risk_amount / (risk_in_pips * pip_value) if (risk_in_pips * pip_value) > 0 else 0
-        lot_size = round(max(0.01, lot_size), 2)  # Min 0.01 lots (micro lot)
-
-        # AGGRESSIVE MODE: Strong trend or high confidence (>= 90%)
-        if is_trending or confidence >= 90:
-            # Boost the lot size for high probability setups
-            if lot_size < 0.05:
+        # ALL CHECKS PASSED → Assign EXACT lot size based on rules
+        # -----------------------------------------------------------
+        # We bypass dynamic risk math entirely and enforce strict lot sizes 
+        # as requested in the pnl_breakdown.md rules.
+        
+        if "XAG" in pair:  # Silver
+            lot_size = 0.02
+        elif "USOIL" in pair or "WTI" in pair:  # Crude Oil
+            lot_size = 0.10
+        elif "BTC" in pair:  # Bitcoin
+            lot_size = 0.03
+        else:  # Forex & Gold
+            # Dynamic Lot Size Progression based on consecutive profitable days
+            if self.consecutive_wins <= 1: # Day 1-2
+                lot_size = 0.03
+            elif self.consecutive_wins == 2: # Day 3
+                lot_size = 0.04
+            elif self.consecutive_wins == 3: # Day 4
                 lot_size = 0.05
-            elif lot_size > 0.1:
-                lot_size = 0.1
-
-        # Check max single position size
-        position_value = lot_size * 100000 * entry_price  # Approximate
-        if position_value > equity * self.max_single_pct:
-            lot_size = round((equity * self.max_single_pct) / (100000 * entry_price), 2)
-            lot_size = max(0.01, lot_size)
+            elif self.consecutive_wins == 4: # Day 5
+                lot_size = 0.07
+            else: # Day 6+
+                lot_size = 0.10
 
         return RiskCheckResult(
             approved=True,
@@ -311,8 +378,19 @@ class RiskAgent:
     # -------------------------------------------------------------------
     # Helper: Get risk % based on capital size
     # -------------------------------------------------------------------
-    def _get_risk_pct(self, equity: float) -> float:
-        """Capital > $2000 → 1.5% risk. Capital ≤ $2000 → 2% risk."""
+    def _get_risk_pct(self, equity: float, pair: str = "") -> float:
+        """
+        Returns the risk percentage for a trade.
+
+        Priority:
+          1. Symbol-specific override (e.g., XAGUSD always 2%)
+          2. Capital-based rule (> $2000 → 1.5%, else 2%)
+        """
+        # Check for symbol-specific override first
+        if pair and pair in self.SYMBOL_RISK_OVERRIDES:
+            return self.SYMBOL_RISK_OVERRIDES[pair]
+
+        # Default capital-based logic
         if equity > self.high_capital_threshold:
             return self.risk_pct_high_capital
         return self.risk_pct_default
@@ -382,3 +460,51 @@ class RiskAgent:
             "daily_pnl": sum(t.pnl for t in self.trades_today),
             "halted": False,  # Updated dynamically
         }
+
+    # -------------------------------------------------------------------
+    # HIGH CONVICTION HOLD CHECK
+    # -------------------------------------------------------------------
+    def check_high_conviction_hold(self, pair: str, confidence: int) -> dict:
+        """
+        For cheap commodities (USOIL, XAGUSD), if confidence >= 90%,
+        allow the position to be held for up to 24 hours (1 full day)
+        instead of the default intraday close.
+
+        Returns:
+            {
+                "allow_extended_hold": bool,
+                "max_hold_hours": int,
+                "reason": str
+            }
+        """
+        if pair not in self.HIGH_CONVICTION_INSTRUMENTS:
+            return {
+                "allow_extended_hold": False,
+                "max_hold_hours": 0,
+                "reason": f"{pair} is not eligible for High Conviction Hold."
+            }
+
+        rules = self.HIGH_CONVICTION_INSTRUMENTS[pair]
+        min_conf = rules["min_confidence"]
+        max_hours = rules["max_hold_hours"]
+
+        if confidence >= min_conf:
+            return {
+                "allow_extended_hold": True,
+                "max_hold_hours": max_hours,
+                "reason": (
+                    f"🔥 HIGH CONVICTION HOLD: {pair} confidence {confidence}% "
+                    f"(≥ {min_conf}%) → position may be held up to {max_hours}h "
+                    f"to let the move play out."
+                )
+            }
+        else:
+            return {
+                "allow_extended_hold": False,
+                "max_hold_hours": 0,
+                "reason": (
+                    f"{pair} confidence {confidence}% is below "
+                    f"High Conviction threshold ({min_conf}%). "
+                    f"Standard intraday rules apply."
+                )
+            }
