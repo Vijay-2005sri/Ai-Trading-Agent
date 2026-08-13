@@ -23,11 +23,19 @@ class MT5DataFetcher:
         return True
         
     def get_historical_data(self, symbol, timeframe, count=500):
-        """Fetches historical OHLCV data."""
+        """Fetches historical OHLCV data. Auto-reconnects if session expires."""
         rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, count)
         if rates is None:
-            print(f"Failed to get data for {symbol}. Error: {mt5.last_error()}")
-            return None
+            print(f"    ⚠️ Session dropped? Attempting auto-reconnect for {symbol}...")
+            # Try to reconnect automatically using stored credentials
+            if self.connect():
+                rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, count)
+                
+            if rates is None:
+                print(f"Failed to get data for {symbol} after reconnect attempt. Error: {mt5.last_error()}")
+                return None
+            else:
+                print(f"    ✅ Auto-reconnect successful!")
             
         df = pd.DataFrame(rates)
         df['time'] = pd.to_datetime(df['time'], unit='s')
@@ -35,10 +43,14 @@ class MT5DataFetcher:
         return df
 
     def get_live_tick(self, symbol):
-        """Gets the most recent tick (bid/ask)."""
+        """Gets the most recent tick (bid/ask). Auto-reconnects if session expires."""
         tick = mt5.symbol_info_tick(symbol)
         if tick is None:
-            return None
+            # Auto-reconnect logic
+            if self.connect():
+                tick = mt5.symbol_info_tick(symbol)
+            if tick is None:
+                return None
         return {
             'bid': tick.bid,
             'ask': tick.ask,

@@ -27,7 +27,7 @@ class WebSearchAgent:
             
     def _duckduckgo_search(self, query, max_results):
         results = []
-        with DDGS() as ddgs:
+        with DDGS(timeout=10) as ddgs:
             # We use text search because 'news' is sometimes rate limited or unstable
             responses = ddgs.text(f"{query} news today", max_results=max_results)
             for r in responses:
