@@ -49,6 +49,15 @@ Complete data flow every cycle:
 
 import os
 import sys
+
+# Force UTF-8 encoding on Windows to prevent emoji crashes (cp1252 can't handle them)
+if sys.platform == "win32":
+    os.environ["PYTHONIOENCODING"] = "utf-8"
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8")
+
 import time
 import json
 import yaml
