@@ -5,12 +5,7 @@ scikit-learn
 arch             # For GARCH (if still used by Quant Agent)
 ta               # Technical Analysis Library
 chromadb         # RAG Vector Database
-langchain        # Agent orchestration
-langchain-openai # LLM integration
-langchain-anthropic
-langchain-community
-langgraph        # Multi-Agent Workflow
-duckduckgo-search # Web search tool
+openai           # Pure LLM API client (Groq, Gemini, OpenRouter, DeepSeek)
 tavily-python    # Better Web Search API
 transformers     # FinBERT and Time-Series
 torch            # PyTorch backend for Transformers/DRL
@@ -19,6 +14,5 @@ finrl            # Financial Reinforcement Learning wrapper
 python-dotenv
 pyyaml
 rich             # Terminal Dashboard
-schedule
 pydantic         # Structured output parsing
 sentence-transformers

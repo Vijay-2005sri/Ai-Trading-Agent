@@ -3,6 +3,7 @@
 LLM PROVIDER — Multi-Provider Smart Router with RAG Grounding
 =============================================================================
 Connects to multiple LLM APIs and auto-switches between them on failure.
+Uses the pure `openai` Python package (no LangChain dependency).
 
 Provider Priority (free → paid fallback):
   1. Groq          (FREE: ~1000 req/day, blazing fast, Llama 3.3-70B)
@@ -26,7 +27,7 @@ import time
 import json
 from typing import Optional
 from pydantic import BaseModel, Field
-from langchain_core.prompts import ChatPromptTemplate
+from openai import OpenAI
 
 
 # =============================================================================
@@ -123,20 +124,21 @@ This protects the trading account from hallucination-driven losses.
 
 
 # =============================================================================
-# LLM PROVIDER
+# LLM PROVIDER — Pure OpenAI SDK (No LangChain)
 # =============================================================================
 
 class LLMProvider:
     """
     Smart LLM Router with auto-failover across free providers.
     Injects GROUNDING_CONTRACT into every prompt.
+    Uses the pure `openai` Python package — zero LangChain dependency.
 
     Usage:
         provider = LLMProvider()
         decision = provider.invoke_structured(prompt, rag_context, TradeDecision)
     """
 
-    # Provider configs: (name, base_url, env_key, model, is_free)
+    # Provider configs
     PROVIDERS = [
         {
             "name":     "Groq",
@@ -182,25 +184,21 @@ class LLMProvider:
 
     def _init_providers(self):
         """Initialize only providers that have API keys set."""
-        from langchain_openai import ChatOpenAI
-
         for cfg in self.PROVIDERS:
             api_key = os.getenv(cfg["env_key"])
             if api_key and api_key not in ("", "sk-...", "AIza...", "gsk_...", "tvly-..."):
                 try:
-                    llm = ChatOpenAI(
+                    client = OpenAI(
                         api_key=api_key,
                         base_url=cfg["base_url"],
-                        model=cfg["model"],
-                        temperature=0.1,
+                        timeout=30.0,
                         max_retries=1,
-                        request_timeout=30,
                     )
                     self.available_providers.append({
                         "name":     cfg["name"],
-                        "llm":      llm,
-                        "is_free":  cfg["is_free"],
+                        "client":   client,
                         "model":    cfg["model"],
+                        "is_free":  cfg["is_free"],
                         "failures": 0,
                     })
                     print(f"  ✅ {cfg['name']} ({cfg['model']}) — ready")
@@ -255,9 +253,13 @@ class LLMProvider:
             if provider is None:
                 raise RuntimeError("All LLM providers are down.")
             try:
-                response          = provider["llm"].invoke(prompt)
+                response = provider["client"].chat.completions.create(
+                    model=provider["model"],
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.1,
+                )
                 provider["failures"] = 0
-                return response.content
+                return response.choices[0].message.content
             except Exception as e:
                 self._failover(provider["name"], str(e))
                 attempts += 1
@@ -283,14 +285,19 @@ class LLMProvider:
         The LLM receives: CONTRACT + RAG_CONTEXT + BASE_PROMPT
         """
         # Build the fully grounded prompt
-        full_prompt = (
-            f"{GROUNDING_CONTRACT}\n\n"
-            f"=== VERIFIED RAG CONTEXT (Source of Truth) ===\n"
-            f"{rag_context}\n\n"
+        user_prompt = (
             f"=== CURRENT MARKET ANALYSIS ===\n"
             f"{base_prompt}\n\n"
             f"Now produce your grounded decision. Remember: cite RAG IDs, "
-            f"copy win rates exactly, and assess hallucination_risk honestly."
+            f"copy win rates exactly, and assess hallucination_risk honestly.\n\n"
+            f"Respond ONLY with valid JSON matching this schema:\n"
+            f"{json.dumps(output_schema.model_json_schema(), indent=2)}"
+        )
+
+        system_prompt = (
+            f"{GROUNDING_CONTRACT}\n\n"
+            f"=== VERIFIED RAG CONTEXT (Source of Truth) ===\n"
+            f"{rag_context}"
         )
 
         attempts     = 0
@@ -302,21 +309,44 @@ class LLMProvider:
                 raise RuntimeError("All LLM providers are down.")
 
             try:
-                structured_llm    = provider["llm"].with_structured_output(output_schema)
-                response          = structured_llm.invoke(full_prompt)
+                response = provider["client"].chat.completions.create(
+                    model=provider["model"],
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    temperature=0.1,
+                    response_format={"type": "json_object"},
+                )
+                raw_content = response.choices[0].message.content
+                
+                # Parse JSON from response
+                data = json.loads(raw_content)
                 provider["failures"] = 0
-                return response
+                return output_schema(**data)
 
             except Exception as e:
-                # Fallback: raw JSON parse
+                # Try without response_format (some providers don't support it)
                 try:
-                    raw = provider["llm"].invoke(
-                        full_prompt + (
-                            "\n\nRespond ONLY with valid JSON matching this schema:\n"
-                            + json.dumps(output_schema.model_json_schema(), indent=2)
-                        )
+                    response = provider["client"].chat.completions.create(
+                        model=provider["model"],
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt},
+                        ],
+                        temperature=0.1,
                     )
-                    data = json.loads(raw.content)
+                    raw_content = response.choices[0].message.content
+                    
+                    # Extract JSON from potential markdown code blocks
+                    cleaned = raw_content.strip()
+                    if cleaned.startswith("```"):
+                        # Remove markdown code fences
+                        lines = cleaned.split("\n")
+                        lines = [l for l in lines if not l.strip().startswith("```")]
+                        cleaned = "\n".join(lines)
+                    
+                    data = json.loads(cleaned)
                     provider["failures"] = 0
                     return output_schema(**data)
                 except Exception:
