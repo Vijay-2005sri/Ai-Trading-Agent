@@ -271,6 +271,11 @@ class TradingEngine:
         self._lock = threading.Lock()  # Protects RAG DB, trade_log, risk_agent
         self._max_workers = min(4, len(self.symbols))  # Parallel threads
 
+        # ── State Caching ────────────────────────────────────────────────────
+        self.last_news_fetch_time = datetime.min
+        self.cached_news_items = []
+        self.cached_fundamental_report = "No news data available."
+        
         # ── Summary ──────────────────────────────────────────────────────────
         rag_stats = self.rag.get_db_stats()
         print("\n" + "=" * 65)
@@ -601,8 +606,13 @@ class TradingEngine:
     def _gather_fundamentals(self, is_high_impact: bool = False) -> tuple[list[dict], str]:
         """
         Search web for news and run FinBERT sentiment analysis.
+        Caches results for 15 minutes to save API credits, especially during sniper mode.
         Returns: (news_items_with_sentiment, formatted_report_string)
         """
+        now = datetime.now()
+        if (now - self.last_news_fetch_time).total_seconds() < 900:  # 15 minutes
+            return self.cached_news_items, self.cached_fundamental_report
+
         # Optimize API credits: Only use premium Tavily search during high impact news
         if is_high_impact:
             self.web_search.use_tavily = bool(os.getenv("TAVILY_API_KEY"))
@@ -666,6 +676,11 @@ class TradingEngine:
             f"=== LIVE NEWS HEADLINES ===\n{headlines}\n\n"
             f"=== SENTIMENT ===\n{sentiment_summary}"
         )
+        
+        self.last_news_fetch_time = now
+        self.cached_news_items = all_news
+        self.cached_fundamental_report = report
+        
         return all_news, report
 
     def _format_quant_report(self, signals: list[dict]) -> str:
@@ -786,7 +801,7 @@ def main():
     engine = TradingEngine()
 
     print("\n🔁 Starting DYNAMIC trading loop.")
-    print("   Normal Mode: 15 minutes | Sniper Mode: 10 seconds")
+    print("   Normal Mode: 15 minutes | Sniper Mode: 2 minutes")
     print("   Press Ctrl+C to stop.\n")
 
     # Run immediately on startup
@@ -802,18 +817,20 @@ def main():
             if is_sniper:
                 print("\n⚡ HIGH FREQUENCY SNIPER MODE ACTIVE! (High-Impact News Imminent)")
                 engine.run_cycle(is_high_impact=True)
-                time.sleep(10)
+                time.sleep(120)  # 2 minute loop during sniper window
                 last_normal_cycle = time.time() # Reset normal timer so it doesn't trigger immediately after sniper ends
             else:
-                # Normal 15-minute loop
-                if now - last_normal_cycle >= 15 * 60:
+                # Normal 1 hour loop
+                if now - last_normal_cycle >= 3600:
                     engine.run_cycle(is_high_impact=False)
                     last_normal_cycle = time.time()
                 time.sleep(1)  # Sleep briefly to prevent 100% CPU usage
+                
     except KeyboardInterrupt:
-        print("\n\n🛑 Shutting down gracefully...")
+        print("\n\n🛑 Received stop signal. Shutting down...")
         print("   Open positions are NOT closed (SL/TP remain active at broker).")
         print("   Trade log saved to trade_log.json.")
+    finally:
         engine.shutdown()
 
 
