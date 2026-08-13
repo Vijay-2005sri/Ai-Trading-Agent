@@ -1,0 +1,4 @@
+{
+  "_comment": "Rolling metrics per strategy for degradation detection.",
+  "strategies": {}
+}
