@@ -14,7 +14,7 @@ import numpy as np
 from typing import Type
 
 # We import the base class/type to know what to expect
-from strategy_library.smc_concepts import TradeSignal
+from strategy_library.live.smc_concepts import TradeSignal
 
 
 class VectorizedBacktester:

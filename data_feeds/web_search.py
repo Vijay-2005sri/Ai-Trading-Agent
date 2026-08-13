@@ -1,5 +1,10 @@
-from duckduckgo_search import DDGS
 import os
+
+try:
+    from duckduckgo_search import DDGS
+    _HAS_DDGS = True
+except ImportError:
+    _HAS_DDGS = False
 
 class WebSearchAgent:
     def __init__(self, use_tavily=False):
