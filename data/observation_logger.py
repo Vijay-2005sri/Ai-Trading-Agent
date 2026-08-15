@@ -133,13 +133,13 @@ class ObservationLogger:
         # Determine session from current UTC hour
         from datetime import timezone
         utc_hour = datetime.now(timezone.utc).hour
-        if 0 <= utc_hour < 8:
+        if 0 <= utc_hour < 7:
             session = "asian"
         elif 7 <= utc_hour < 12:
             session = "london"
         elif 12 <= utc_hour < 16:
             session = "overlap"
-        elif 12 <= utc_hour < 21:
+        elif 16 <= utc_hour < 21:
             session = "new_york"
         else:
             session = "off_hours"

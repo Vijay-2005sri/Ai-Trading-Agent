@@ -360,6 +360,10 @@ class RiskAgent:
             else: # Day 6+
                 lot_size = 0.10
 
+        # Calculate risk percentage for reporting purposes
+        risk_pct = self._get_risk_pct(equity, pair)
+        risk_amount = equity * risk_pct * size_multiplier
+
         return RiskCheckResult(
             approved=True,
             adjusted_lot_size=lot_size,

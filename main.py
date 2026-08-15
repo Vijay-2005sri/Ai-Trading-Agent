@@ -204,7 +204,7 @@ class TradingEngine:
         self.demo_mode = self.config["broker"].get("demo_mode", True)
 
         # ── Data Feeds ──────────────────────────────────────────────────────
-        print("\n[1/6] Initializing Data Feeds...")
+        print("\n[1/7] Initializing Data Feeds...")
         self.mt5_fetcher = MT5DataFetcher(
             login=int(os.getenv("MT5_LOGIN", "0")),
             password=os.getenv("MT5_PASSWORD", ""),
@@ -221,7 +221,7 @@ class TradingEngine:
         print("  ⏳ FinBERT will load on first news analysis")
 
         # ── RAG Memory System ───────────────────────────────────────────────
-        print("\n[2/6] Initializing RAG Memory System...")
+        print("\n[2/7] Initializing RAG Memory System...")
         rag_db_path = self.config.get("rag", {}).get("db_path", "rag_system/chroma_db")
         self.rag    = TradingRAG(db_path=rag_db_path)
 
@@ -230,12 +230,12 @@ class TradingEngine:
         print("  ✅ Grounding Validator ready (hallucination guard active)")
 
         # ── Load Trading Concepts (The "Gem" Knowledge) ──────────────────────
-        print("\n[5/6] Loading Trading Concepts Knowledge...")
+        print("\n[3/7] Loading Trading Concepts Knowledge...")
         self.concept_knowledge = self._load_trading_concepts()
         self.strategy_knowledge = get_strategy_summary()
 
         # ── LLM Provider ────────────────────────────────────────────────────
-        print("\n[3/6] Initializing LLM Providers...")
+        print("\n[4/7] Initializing LLM Providers...")
         self.llm_provider = LLMProvider()
 
         # ── Observation Logger & Monitor ─────────────────────────────────────
@@ -243,17 +243,17 @@ class TradingEngine:
         self.performance_monitor = PerformanceMonitor()
 
         # ── Brain ────────────────────────────────────────────────────────────
-        print("\n[4/6] Initializing Trading Brain...")
+        print("\n[5/7] Initializing Trading Brain...")
         self.brain = TradingBrain(self.llm_provider)
         print("  ✅ Brain ready (RAG-grounded mode)")
 
         # ── Risk Agent ───────────────────────────────────────────────────────
-        print("\n[5/6] Initializing Risk Agent...")
+        print("\n[6/7] Initializing Risk Agent...")
         self.risk_agent = RiskAgent(self.config)
         print("  ✅ Risk Agent ready")
 
         # ── Order Executor (Broker) ─────────────────────────────────────────
-        print("\n[6/6] Initializing Order Executor...")
+        print("\n[7/7] Initializing Order Executor...")
         self.executor = OrderExecutor(demo_mode=self.demo_mode)
         self.executor.connect(
             login=int(os.getenv("MT5_LOGIN", "0")),
@@ -610,14 +610,15 @@ class TradingEngine:
         Returns: (news_items_with_sentiment, formatted_report_string)
         """
         now = datetime.now()
-        if (now - self.last_news_fetch_time).total_seconds() < 900:  # 15 minutes
+        
+        # Cache duration: 2 minutes during sniper mode, 4 hours normally
+        cache_seconds = 110 if is_high_impact else 14300
+        
+        if (now - self.last_news_fetch_time).total_seconds() < cache_seconds:
             return self.cached_news_items, self.cached_fundamental_report
 
-        # Optimize API credits: Only use premium Tavily search during high impact news
-        if is_high_impact:
-            self.web_search.use_tavily = bool(os.getenv("TAVILY_API_KEY"))
-        else:
-            self.web_search.use_tavily = False
+        # Always use Tavily if available, per user request
+        self.web_search.use_tavily = bool(os.getenv("TAVILY_API_KEY"))
 
         # If not high impact, limit to just 1 general query to save duckduckgo bandwidth too
         queries = [
@@ -801,7 +802,7 @@ def main():
     engine = TradingEngine()
 
     print("\n🔁 Starting DYNAMIC trading loop.")
-    print("   Normal Mode: 15 minutes | Sniper Mode: 2 minutes")
+    print("   Normal Mode: 4 hours | Sniper Mode: 2 minutes")
     print("   Press Ctrl+C to stop.\n")
 
     # Run immediately on startup
@@ -820,8 +821,8 @@ def main():
                 time.sleep(120)  # 2 minute loop during sniper window
                 last_normal_cycle = time.time() # Reset normal timer so it doesn't trigger immediately after sniper ends
             else:
-                # Normal 1 hour loop
-                if now - last_normal_cycle >= 3600:
+                # Normal 4 hour loop
+                if now - last_normal_cycle >= 14400:
                     engine.run_cycle(is_high_impact=False)
                     last_normal_cycle = time.time()
                 time.sleep(1)  # Sleep briefly to prevent 100% CPU usage

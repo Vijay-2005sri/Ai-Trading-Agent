@@ -17,7 +17,7 @@ Methods expected by main.py:
 =============================================================================
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 
@@ -77,8 +77,8 @@ class EconomicCalendar:
     """
 
     # How many minutes before/after a high-impact event to enter Sniper Mode
-    SNIPER_WINDOW_BEFORE_MINUTES = 15
-    SNIPER_WINDOW_AFTER_MINUTES  = 30
+    SNIPER_WINDOW_BEFORE_MINUTES = 0
+    SNIPER_WINDOW_AFTER_MINUTES  = 60
 
     def __init__(self):
         self.events: list[dict] = []
@@ -89,7 +89,7 @@ class EconomicCalendar:
         Load the hardcoded calendar into memory.
         Call this once at startup.
         """
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         current_year = now.year
 
         self.events = []
@@ -123,7 +123,7 @@ class EconomicCalendar:
         if not self._loaded:
             return []
 
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         window_end = now + timedelta(minutes=minutes_ahead)
 
         upcoming = []
@@ -174,7 +174,7 @@ class EconomicCalendar:
         if not self._loaded:
             return False
 
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         for event in self.events:
             if event["impact"] != "HIGH":
@@ -197,7 +197,7 @@ class EconomicCalendar:
         if not self._loaded:
             return None
 
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         for event in self.events:
             if event["datetime"] > now:
                 mins_until = (event["datetime"] - now).total_seconds() / 60

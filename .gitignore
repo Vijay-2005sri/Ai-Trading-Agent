@@ -34,6 +34,13 @@ logs/
 *.ex5
 *.mq5
 
+# ── RAG System (ChromaDB) ──────────────────────────
+# These are runtime-generated vector DB files.
+# They must NOT be committed — they are local to each machine.
+rag_system/chroma_db/
+
+# ── Generated / Runtime Files ───────────────────────
 chat_history.md
+conversation_history.txt
 agents/streak_tracker.json
 trade_log.json
