@@ -1,9 +1,10 @@
 """
 =============================================================================
-DASHBOARD — Live Terminal Monitor (Fully Integrated)
+DASHBOARD — Live Terminal Monitor (Two-Tier System + Debate Arena)
 =============================================================================
 Reads trade_log.json every 2 seconds and displays:
   - Recent Brain decisions (with grounding scores)
+  - LLM Debate Arena (Gold debate visualization)
   - RAG memory stats
   - Open positions from MT5
   - Risk & System status
@@ -43,7 +44,8 @@ class LiveDashboard:
             Layout(name="right", ratio=2),
         )
         layout["left"].split_column(
-            Layout(name="decisions",  ratio=3),
+            Layout(name="decisions",  ratio=2),
+            Layout(name="debate",     ratio=3),
             Layout(name="positions",  ratio=2),
         )
         layout["right"].split_column(
@@ -125,8 +127,127 @@ class LiveDashboard:
 
         return Panel(
             table,
-            title="[bold]📊 Recent Brain Decisions (with Grounding Score)[/]",
+            title="[bold]📊 Recent Brain Decisions[/]",
             border_style="blue"
+        )
+
+    # ── NEW: Debate Arena Panel ──────────────────────────────────────────────
+    def build_debate_panel(self, logs: list) -> Panel:
+        """
+        Visualize the LLM Debate Arena for Gold (XAUUSD).
+        Shows each model's decision, debate interactions, and consensus.
+        """
+        # Find the most recent Gold debate entry
+        debate_entry = None
+        for log in reversed(logs):
+            if log.get("pair") == "XAUUSD" and log.get("debate"):
+                debate_entry = log
+                break
+
+        if debate_entry is None:
+            return Panel(
+                "[dim]No Gold debate data yet. Waiting for first cycle...[/]",
+                title="[bold]🏟️ LLM Debate Arena (XAUUSD)[/]",
+                border_style="yellow"
+            )
+
+        debate = debate_entry.get("debate", {})
+        models = debate.get("models_participated", [])
+        r1_decisions = debate.get("round1_decisions", {})
+        r3_votes = debate.get("round3_votes", [])
+        consensus_action = debate.get("consensus_action", "?")
+        consensus_conf = debate.get("consensus_confidence", 0)
+        vote_tally = debate.get("vote_tally", {})
+        successful = debate.get("debate_successful", False)
+
+        lines = []
+
+        if not successful:
+            lines.append("[yellow]⚠️ Debate incomplete — single-model fallback used[/]")
+            lines.append("")
+
+        # ── Round 1: Each model's independent decision ───────────────
+        lines.append("[bold cyan]ROUND 1 — Independent Analysis[/]")
+        for model_name, decision in r1_decisions.items():
+            action = decision.get("action", "?")
+            conf = decision.get("confidence", 0)
+            strategy = decision.get("strategy_used", "?")
+
+            if action == "BUY":
+                color = "green"
+                icon = "🟢"
+            elif action == "SELL":
+                color = "red"
+                icon = "🔴"
+            else:
+                color = "yellow"
+                icon = "🟡"
+
+            # Truncate long model names for display
+            short_name = model_name[:25]
+            lines.append(
+                f"  {icon} [{color}]{short_name:<25}[/] → "
+                f"[bold {color}]{action}[/] {conf}% ({strategy})"
+            )
+
+        lines.append("")
+
+        # ── Round 2: Debate highlights ───────────────────────────────
+        critiques = debate.get("round2_critiques", [])
+        if critiques:
+            lines.append("[bold cyan]ROUND 2 — Debate & Roast[/]")
+            for c in critiques[:4]:  # Show at most 4 critiques
+                model = c.get("model_name", "?")[:20]
+                revised = c.get("revised_action", "?")
+                key_arg = c.get("key_argument", "")[:60]
+
+                if revised == "BUY":
+                    r_color = "green"
+                elif revised == "SELL":
+                    r_color = "red"
+                else:
+                    r_color = "yellow"
+
+                lines.append(
+                    f"  💬 {model}: [{r_color}]{revised}[/] — \"{key_arg}...\""
+                )
+            lines.append("")
+
+        # ── Round 3: Vote tally + Consensus ──────────────────────────
+        if vote_tally:
+            lines.append("[bold cyan]ROUND 3 — Consensus Vote[/]")
+            tally_parts = []
+            for action, count in vote_tally.items():
+                if action == "BUY":
+                    tally_parts.append(f"[green]BUY: {count}[/]")
+                elif action == "SELL":
+                    tally_parts.append(f"[red]SELL: {count}[/]")
+                else:
+                    tally_parts.append(f"[yellow]HOLD: {count}[/]")
+            lines.append(f"  Votes: {' | '.join(tally_parts)}")
+            lines.append("")
+
+        # ── Final consensus ──────────────────────────────────────────
+        if consensus_action == "BUY":
+            c_color = "bold green"
+        elif consensus_action == "SELL":
+            c_color = "bold red"
+        else:
+            c_color = "bold yellow"
+
+        lines.append(
+            f"  🏆 [bold]CONSENSUS:[/] [{c_color}]{consensus_action}[/] "
+            f"({consensus_conf}% confidence)"
+        )
+
+        # Timestamp
+        ts = debate_entry.get("timestamp", "")[-8:]
+        lines.append(f"\n  [dim]Last debate: {ts}[/]")
+
+        return Panel(
+            "\n".join(lines),
+            title="[bold]🏟️ LLM Debate Arena (XAUUSD)[/]",
+            border_style="yellow"
         )
 
     def build_rag_status(self, logs: list) -> Panel:
@@ -159,7 +280,7 @@ class LiveDashboard:
         return Panel(text, title="[bold]🧠 RAG Grounding Status[/]", border_style="cyan")
 
     def build_system_status(self, logs: list) -> Panel:
-        """Build system status panel."""
+        """Build system status panel with two-tier info."""
         # Get stats from recent logs
         recent = logs[-20:] if logs else []
         buys   = sum(1 for l in recent if l.get("action") == "BUY" and "EXECUTED" in l.get("outcome", ""))
@@ -167,17 +288,32 @@ class LiveDashboard:
         holds  = sum(1 for l in recent if l.get("action") == "HOLD")
         vetoes = sum(1 for l in recent if "VETOED" in l.get("outcome", ""))
 
+        # Count Gold vs secondary decisions
+        gold_decisions = sum(1 for l in recent if l.get("pair") == "XAUUSD")
+        secondary_decisions = len(recent) - gold_decisions
+
+        # Debate stats
+        debate_count = sum(1 for l in recent if l.get("debate", {}).get("debate_successful"))
+        debate_models = set()
+        for l in recent:
+            debate_models.update(l.get("debate", {}).get("models_participated", []))
+
         providers = set(l.get("llm_provider", "") for l in recent if l.get("llm_provider"))
         provider_str = ", ".join(providers) if providers else "N/A"
 
         status_text = (
             "[bold green]● System Online[/]\n\n"
+            f"[bold]Two-Tier Architecture:[/]\n"
+            f"  🥇 Gold decisions:      [cyan]{gold_decisions}[/]\n"
+            f"  🥈 Secondary decisions:  [cyan]{secondary_decisions}[/]\n"
+            f"  🏟️ Debates completed:    [cyan]{debate_count}[/]\n"
+            f"  🤖 Debate participants:  [cyan]{len(debate_models)}[/]\n\n"
             f"[bold]Last 20 decisions:[/]\n"
             f"  BUYs executed:  [green]{buys}[/]\n"
             f"  SELLs executed: [red]{sells}[/]\n"
             f"  HOLDs:          [yellow]{holds}[/]\n"
             f"  Risk vetoes:    [bold red]{vetoes}[/]\n\n"
-            f"[bold]LLM Providers:[/]\n  {provider_str}\n\n"
+            f"[bold]Active LLM:[/] {provider_str}\n\n"
             f"[bold]Risk Rules:[/]\n"
             f"  Max 2-3 trades/day\n"
             f"  2% risk per trade\n"
@@ -239,6 +375,7 @@ class LiveDashboard:
 
                 layout["header"].update(self.build_header())
                 layout["decisions"].update(self.build_decisions_table(logs))
+                layout["debate"].update(self.build_debate_panel(logs))
                 layout["positions"].update(self.build_positions_panel())
                 layout["rag_status"].update(self.build_rag_status(logs))
                 layout["sys_status"].update(self.build_system_status(logs))

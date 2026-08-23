@@ -138,7 +138,7 @@ class LLMProvider:
         decision = provider.invoke_structured(prompt, rag_context, TradeDecision)
     """
 
-    # Provider configs
+    # Provider configs — ordered by priority (free first, paid last)
     PROVIDERS = [
         {
             "name":     "Groq",
@@ -166,6 +166,27 @@ class LLMProvider:
             "base_url": "https://openrouter.ai/api/v1",
             "env_key":  "OPENROUTER_API_KEY",
             "model":    "qwen/qwen3-coder:free",
+            "is_free":  True,
+        },
+        {
+            "name":     "SambaNova (Llama 3.1 70B)",
+            "base_url": "https://api.sambanova.ai/v1",
+            "env_key":  "SAMBANOVA_API_KEY",
+            "model":    "Meta-Llama-3.1-70B-Instruct",
+            "is_free":  True,
+        },
+        {
+            "name":     "HuggingFace (Qwen Coder 32B)",
+            "base_url": "https://api-inference.huggingface.co/v1/",
+            "env_key":  "HF_TOKEN",
+            "model":    "Qwen/Qwen2.5-Coder-32B-Instruct",
+            "is_free":  True,
+        },
+        {
+            "name":     "HuggingFace (Llama 3.1 8B)",
+            "base_url": "https://api-inference.huggingface.co/v1/",
+            "env_key":  "HF_TOKEN",
+            "model":    "meta-llama/Meta-Llama-3.1-8B-Instruct",
             "is_free":  True,
         },
         {
@@ -383,3 +404,136 @@ class LLMProvider:
             }
             for p in self.available_providers
         ]
+
+    # =================================================================
+    # DEBATE ARENA METHODS — Per-Provider Targeting
+    # =================================================================
+    # These methods let the DebateArena send prompts to SPECIFIC models
+    # instead of using the auto-failover router.
+
+    def get_all_available_names(self) -> list[str]:
+        """Return names of all available (configured) providers."""
+        return [p["name"] for p in self.available_providers]
+
+    def get_provider_by_name(self, name: str) -> Optional[dict]:
+        """Get a specific provider by its name. Returns None if not found."""
+        for p in self.available_providers:
+            if p["name"] == name:
+                return p
+        return None
+
+    def invoke_on_provider(
+        self,
+        provider_name: str,
+        prompt: str,
+        system_prompt: str = "",
+        temperature: float = 0.1
+    ) -> Optional[str]:
+        """
+        Send a text prompt to a SPECIFIC provider (not the auto-router).
+        Used by the Debate Arena to get each model's independent opinion.
+
+        Returns the response string, or None if the provider fails.
+        Does NOT trigger failover — the caller (DebateArena) handles that.
+        """
+        provider = self.get_provider_by_name(provider_name)
+        if provider is None:
+            print(f"  ⚠️  Provider '{provider_name}' not found.")
+            return None
+
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+
+        try:
+            response = provider["client"].chat.completions.create(
+                model=provider["model"],
+                messages=messages,
+                temperature=temperature,
+            )
+            provider["failures"] = 0
+            return response.choices[0].message.content
+        except Exception as e:
+            provider["failures"] += 1
+            print(f"  ⚠️  {provider_name} failed: {str(e)[:120]}")
+            return None
+
+    def invoke_structured_on_provider(
+        self,
+        provider_name: str,
+        base_prompt: str,
+        rag_context: str,
+        output_schema: type[BaseModel] = TradeDecision
+    ) -> Optional[BaseModel]:
+        """
+        Send a grounded, structured prompt to a SPECIFIC provider.
+        Used by the Debate Arena for Round 1 (each model's independent analysis).
+
+        Returns a Pydantic model instance, or None if the provider fails.
+        Does NOT trigger failover — the caller (DebateArena) handles that.
+        """
+        provider = self.get_provider_by_name(provider_name)
+        if provider is None:
+            print(f"  ⚠️  Provider '{provider_name}' not found.")
+            return None
+
+        user_prompt = (
+            f"=== CURRENT MARKET ANALYSIS ===\n"
+            f"{base_prompt}\n\n"
+            f"Now produce your grounded decision. Remember: cite RAG IDs, "
+            f"copy win rates exactly, and assess hallucination_risk honestly.\n\n"
+            f"Respond ONLY with valid JSON matching this schema:\n"
+            f"{json.dumps(output_schema.model_json_schema(), indent=2)}"
+        )
+
+        system_prompt = (
+            f"{GROUNDING_CONTRACT}\n\n"
+            f"=== VERIFIED RAG CONTEXT (Source of Truth) ===\n"
+            f"{rag_context}"
+        )
+
+        # Attempt 1: with response_format
+        try:
+            response = provider["client"].chat.completions.create(
+                model=provider["model"],
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.1,
+                response_format={"type": "json_object"},
+            )
+            raw_content = response.choices[0].message.content
+            data = json.loads(raw_content)
+            provider["failures"] = 0
+            return output_schema(**data)
+        except Exception:
+            pass
+
+        # Attempt 2: without response_format (some providers don't support it)
+        try:
+            response = provider["client"].chat.completions.create(
+                model=provider["model"],
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.1,
+            )
+            raw_content = response.choices[0].message.content
+
+            # Extract JSON from potential markdown code blocks
+            cleaned = raw_content.strip()
+            if cleaned.startswith("```"):
+                lines = cleaned.split("\n")
+                lines = [l for l in lines if not l.strip().startswith("```")]
+                cleaned = "\n".join(lines)
+
+            data = json.loads(cleaned)
+            provider["failures"] = 0
+            return output_schema(**data)
+        except Exception as e:
+            provider["failures"] += 1
+            print(f"  ⚠️  {provider_name} structured call failed: {str(e)[:120]}")
+            return None

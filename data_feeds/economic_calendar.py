@@ -95,7 +95,7 @@ class EconomicCalendar:
         self.events = []
         for month, day, hour, minute, name, impact in HIGH_IMPACT_EVENTS_2026:
             try:
-                event_dt = datetime(current_year, month, day, hour, minute)
+                event_dt = datetime(current_year, month, day, hour, minute, tzinfo=timezone.utc)
                 self.events.append({
                     "datetime": event_dt,
                     "name":     name,
