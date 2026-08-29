@@ -1,11 +1,14 @@
 import torch
+import warnings
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
 class NewsSentimentAnalyzer:
     def __init__(self, model_name="ProsusAI/finbert"):
         print(f"Loading Sentiment Model: {model_name}")
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModelForSequenceClassification.from_pretrained(model_name)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=DeprecationWarning)
+            self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+            self.model = AutoModelForSequenceClassification.from_pretrained(model_name)
         # FinBERT labels: 0: positive, 1: negative, 2: neutral
         self.labels = ["positive", "negative", "neutral"]
 

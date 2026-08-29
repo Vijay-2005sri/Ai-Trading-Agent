@@ -174,7 +174,7 @@ class TradingBrain:
             return decision
 
         except Exception as e:
-            print(f"  ❌ Brain evaluation failed: {e}")
+            print(f"  [ERR] Brain evaluation failed: {e}")
             return TradeDecision(
                 action="HOLD",
                 pair=pair,
@@ -229,7 +229,7 @@ class TradingBrain:
                 return debate_result.winning_decision, debate_result
 
             # Debate failed (< 2 models available) — fallback to single model
-            print(f"    ⚠️ Debate failed — falling back to single-model evaluation.")
+            print(f"    [WARN] Debate failed -- falling back to single-model evaluation.")
             decision = self.evaluate(
                 quant_report=quant_report,
                 fundamental_report=fundamental_report,
@@ -241,7 +241,7 @@ class TradingBrain:
             return decision, debate_result
 
         except Exception as e:
-            print(f"  ❌ Debate Arena error: {e}. Falling back to single-model.")
+            print(f"  [ERR] Debate Arena error: {e}. Falling back to single-model.")
             decision = self.evaluate(
                 quant_report=quant_report,
                 fundamental_report=fundamental_report,
@@ -268,7 +268,7 @@ class TradingEngine:
 
     def __init__(self):
         print("=" * 65)
-        print("  🧠 ADVANCED AI TRADING AGENT — FULLY INTEGRATED SYSTEM")
+        print("  ADVANCED AI TRADING AGENT — FULLY INTEGRATED SYSTEM")
         print("=" * 65)
 
         # ── Config ──────────────────────────────────────────────────────────
@@ -288,52 +288,52 @@ class TradingEngine:
         self.sentiment_analyzer = None  # Lazy load — FinBERT is heavy
         self.calendar = EconomicCalendar()
         self.calendar.fetch_calendar()
-        print("  ✅ Web Search Agent ready")
-        print("  ✅ Economic Calendar loaded")
-        print("  ⏳ FinBERT will load on first news analysis")
+        print("  [OK] Web Search Agent ready")
+        print("  [OK] Economic Calendar loaded")
+        print("  [..] FinBERT will load on first news analysis")
 
         # ── MT5 Auto-Connect & Health Check ──────────────────────────────
-        print("\n  🔌 MT5 Auto-Connect & Health Check...")
+        print("\n  -- MT5 Auto-Connect & Health Check...")
         mt5_connected = self.mt5_fetcher.connect()
         if mt5_connected:
             health = self.mt5_fetcher.health_check(self.symbols)
             if health["issues"]:
-                print("\n  ⚠️  MT5 Health Check — Issues Found:")
+                print("\n  [WARN] MT5 Health Check — Issues Found:")
                 for i, issue in enumerate(health["issues"], 1):
                     print(f"     {i}. {issue}")
             else:
-                print("  ✅ MT5 Health Check PASSED — all systems nominal.")
+                print("  [OK] MT5 Health Check PASSED — all systems nominal.")
 
             # Report symbol status
             ok_symbols = [s for s, ok in health["symbols_status"].items() if ok]
             bad_symbols = [s for s, ok in health["symbols_status"].items() if not ok]
             if ok_symbols:
-                print(f"  ✅ Symbols ready ({len(ok_symbols)}/{len(self.symbols)}): "
+                print(f"  [OK] Symbols ready ({len(ok_symbols)}/{len(self.symbols)}): "
                       f"{', '.join(ok_symbols)}")
             if bad_symbols:
-                print(f"  ❌ Symbols FAILED ({len(bad_symbols)}): {', '.join(bad_symbols)}")
-                print("     💡 These symbols will be skipped. Remove from config/settings.yaml "
+                print(f"  [ERR] Symbols FAILED ({len(bad_symbols)}): {', '.join(bad_symbols)}")
+                print("     >> These symbols will be skipped. Remove from config/settings.yaml "
                       "or add them in MT5 Market Watch.")
                 # Filter out unavailable symbols so the bot doesn't waste cycles
                 self.symbols = [s for s in self.symbols if s in ok_symbols]
 
             # Report algo trading status
             if health.get("algo_trading_enabled"):
-                print("  ✅ Algo Trading: ENABLED")
+                print("  [OK] Algo Trading: ENABLED")
             else:
-                print("  ⚠️  Algo Trading: DISABLED — trades will be blocked!")
-                print("     💡 FIX: MT5 → Tools → Options → Expert Advisors → "
+                print("  [WARN] Algo Trading: DISABLED — trades will be blocked!")
+                print("     >> FIX: MT5 -> Tools -> Options -> Expert Advisors -> "
                       "Enable 'Allow algorithmic trading'")
 
             # Report account info
             acct = health.get("account_info")
             if acct:
-                print(f"  💰 Account: {acct['login']} | Balance: ${acct['balance']:.2f} | "
+                print(f"  [$] Account: {acct['login']} | Balance: ${acct['balance']:.2f} | "
                       f"Equity: ${acct['equity']:.2f} | Mode: {acct['trade_mode']}")
         else:
-            print("  ⚠️  MT5 connection failed — bot will attempt reconnection each cycle.")
+            print("  [WARN] MT5 connection failed — bot will attempt reconnection each cycle.")
             print("     The self-healing system will auto-launch and reconnect as needed.")
-        print("  ✅ MT5 Data Fetcher ready (self-healing enabled)")
+        print("  [OK] MT5 Data Fetcher ready (self-healing enabled)")
 
         # ── RAG Memory System ───────────────────────────────────────────────
         print("\n[2/7] Initializing RAG Memory System...")
@@ -342,7 +342,7 @@ class TradingEngine:
 
         # ── Grounding Validator ─────────────────────────────────────────────
         self.validator = GroundingValidator()
-        print("  ✅ Grounding Validator ready (hallucination guard active)")
+        print("  [OK] Grounding Validator ready (hallucination guard active)")
 
         # ── Load Trading Concepts (The "Gem" Knowledge) ──────────────────────
         print("\n[3/7] Loading Trading Concepts Knowledge...")
@@ -362,14 +362,14 @@ class TradingEngine:
         self.brain = TradingBrain(self.llm_provider)
         self.debate_arena = DebateArena(self.llm_provider)
         self._debate_model_names = self.llm_provider.get_all_available_names()
-        print("  ✅ Brain ready (RAG-grounded mode)")
-        print(f"  🏆 Debate Arena ready — {len(self._debate_model_names)} models for Gold debate")
+        print("  [OK] Brain ready (RAG-grounded mode)")
+        print(f"  [OK] Debate Arena ready — {len(self._debate_model_names)} models for Gold debate")
         print(f"     Models: {', '.join(self._debate_model_names)}")
 
         # ── Risk Agent ───────────────────────────────────────────────────────
         print("\n[6/7] Initializing Risk Agent...")
         self.risk_agent = RiskAgent(self.config)
-        print("  ✅ Risk Agent ready")
+        print("  [OK] Risk Agent ready")
 
         # ── Order Executor (Broker) ─────────────────────────────────────────
         print("\n[7/7] Initializing Order Executor...")
@@ -380,7 +380,7 @@ class TradingEngine:
             server=os.getenv("MT5_SERVER", "XMGlobal-MT5"),
             path=os.getenv("MT5_PATH", None)
         )
-        print("  ✅ Order Executor ready")
+        print("  [OK] Order Executor ready")
 
         # ── Trade Log ────────────────────────────────────────────────────────
         self.trade_log_path = Path(__file__).parent / "trade_log.json"
@@ -404,13 +404,13 @@ class TradingEngine:
         # ── Summary ──────────────────────────────────────────────────────────
         rag_stats = self.rag.get_db_stats()
         print("\n" + "=" * 65)
-        print(f"  🟢 SYSTEM ONLINE | Mode: {'DEMO' if self.demo_mode else '⚠️ LIVE'}")
-        print(f"  🥇 Primary Market: {self.gold_symbol} (Multi-LLM Debate)")
-        print(f"  🥈 Secondary Pool: {', '.join(self.non_gold_symbols)} ({len(self.non_gold_symbols)} candidates)")
-        print(f"  🤖 Debate Models: {len(self._debate_model_names)} active")
-        print(f"  🧠 RAG: {rag_stats.get('trade_records', 0)} trades | "
+        print(f"  [ONLINE] Mode: {'DEMO' if self.demo_mode else '[!] LIVE'}")
+        print(f"  [T1] Primary Market: {self.gold_symbol} (Multi-LLM Debate)")
+        print(f"  [T2] Secondary Pool: {', '.join(self.non_gold_symbols)} ({len(self.non_gold_symbols)} candidates)")
+        print(f"  [AI] Debate Models: {len(self._debate_model_names)} active")
+        print(f"  [DB] RAG: {rag_stats.get('trade_records', 0)} trades | "
               f"{rag_stats.get('news_records', 0)} news events in memory")
-        print(f"  🛡️  Grounding Validator: ACTIVE")
+        print(f"  [OK] Grounding Validator: ACTIVE")
         print("=" * 65 + "\n")
 
     def _load_trading_concepts(self) -> str:
@@ -434,7 +434,7 @@ class TradingEngine:
             knowledge += "\n\n" + mt5_knowledge_path.read_text(encoding="utf-8")
             
         if not knowledge:
-            print("  ⚠️ Trading concepts not found. The Brain will run without fundamental concept knowledge.")
+            print("  [WARN] Trading concepts not found. The Brain will run without fundamental concept knowledge.")
             
         return knowledge
 
@@ -456,11 +456,11 @@ class TradingEngine:
         """
         cycle_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(f"\n{'═' * 65}")
-        print(f"  ⏰ CYCLE START: {cycle_time}")
+        print(f"  CYCLE START: {cycle_time}")
         print(f"{'═' * 65}")
 
         # ── STEP 1: Fundamental Data ──────────────────────────────────────
-        print(f"\n  [STEP 1] 🌐 Gathering global news & sentiment... (High Impact: {is_high_impact})")
+        print(f"\n  [STEP 1] Gathering global news & sentiment... (High Impact: {is_high_impact})")
         news_items, fundamental_report = self._gather_fundamentals(is_high_impact)
 
         # Save news events to RAG memory for future cycles
@@ -474,21 +474,21 @@ class TradingEngine:
 
         # ── STEP 2: TIER 1 — Gold Multi-LLM Debate ───────────────────────
         print(f"\n  {'═' * 60}")
-        print(f"  [STEP 2] 🥇 TIER 1: GOLD ({self.gold_symbol}) — Multi-LLM Debate")
+        print(f"  [STEP 2] TIER 1: GOLD ({self.gold_symbol}) -- Multi-LLM Debate")
         print(f"  {'═' * 60}")
         self._process_gold_with_debate(fundamental_report)
 
         # ── STEP 3: TIER 2 — Secondary Market Selection ──────────────────
         if self.non_gold_symbols:
             print(f"\n  {'═' * 60}")
-            print(f"  [STEP 3] 🥈 TIER 2: Secondary Market Selection")
+            print(f"  [STEP 3] TIER 2: Secondary Market Selection")
             print(f"  {'═' * 60}")
             self._process_secondary_market(fundamental_report)
         else:
-            print(f"\n  [STEP 3] ⏭️ No secondary symbols configured — Gold only mode.")
+            print(f"\n  [STEP 3] No secondary symbols configured -- Gold only mode.")
 
         print(f"\n{'═' * 65}")
-        print(f"  ✅ CYCLE COMPLETE: {datetime.now().strftime('%H:%M:%S')}")
+        print(f"  CYCLE COMPLETE: {datetime.now().strftime('%H:%M:%S')}")
         print(f"{'═' * 65}")
 
     # =======================================================================
@@ -501,17 +501,17 @@ class TradingEngine:
         All available models debate before a trade is placed.
         """
         symbol = self.gold_symbol
-        print(f"\n    📈 Fetching {symbol} data from MT5...")
+        print(f"\n    >> Fetching {symbol} data from MT5...")
 
         # ── Get market data ──────────────────────────────────────────
         try:
             import MetaTrader5 as mt5
             df = self.mt5_fetcher.get_historical_data(symbol, mt5.TIMEFRAME_H1, count=200)
             if df is None or df.empty:
-                print(f"    ⚠️  No data for {symbol}. Skipping Gold this cycle.")
+                print(f"    [WARN] No data for {symbol}. Skipping Gold this cycle.")
                 return
         except Exception as e:
-            print(f"    ⚠️  MT5 data error for {symbol}: {e}. Skipping.")
+            print(f"    [WARN] MT5 data error for {symbol}: {e}. Skipping.")
             return
 
         # ── Run all strategies ───────────────────────────────────────
@@ -519,18 +519,18 @@ class TradingEngine:
         strategy_signals = run_all_strategies(df, pair=symbol)
 
         if not strategy_signals:
-            print(f"    📭 No signals from any strategy for {symbol}.")
+            print(f"    -- No signals from any strategy for {symbol}.")
             return
 
         top_signal = strategy_signals[0]
         print(
-            f"    📊 {len(strategy_signals)} signal(s) | Top: "
+            f"    {len(strategy_signals)} signal(s) | Top: "
             f"{top_signal['strategy']} ({top_signal['confidence']}% conf)"
         )
         quant_report = self._format_quant_report(strategy_signals)
 
         # ── RAG Memory Query ─────────────────────────────────────────
-        print(f"    [2b] 🧠 Querying RAG memory for {symbol}...")
+        print(f"    [2b] Querying RAG memory for {symbol}...")
         market_context = f"Price action context: {top_signal.get('reasoning', '')[:200]}"
 
         with self._lock:
@@ -554,13 +554,13 @@ class TradingEngine:
 
         cold_start = trade_recall.get("is_cold_start", True)
         print(
-            f"    📚 RAG: {trade_recall['total_found']} trade memories | "
+            f"    RAG: {trade_recall['total_found']} trade memories | "
             f"{news_recall['total_found']} news memories | "
-            f"{'⚠️ COLD START' if cold_start else '✅ History found'}"
+            f"{'[COLD START]' if cold_start else '[OK] History found'}"
         )
 
         # ── DEBATE: Multi-LLM Decision ───────────────────────────────
-        print(f"\n    [2c] 🏟️  DEBATE ARENA: {symbol} — All models evaluating...")
+        print(f"\n    [2c] DEBATE ARENA: {symbol} -- All models evaluating...")
         decision, debate_result = self.brain.evaluate_with_debate(
             quant_report=quant_report,
             fundamental_report=fundamental_report,
@@ -573,13 +573,13 @@ class TradingEngine:
 
         if debate_result.debate_successful:
             print(
-                f"    🏆 Debate Consensus: {decision.action} {symbol} "
+                f"    >> Debate Consensus: {decision.action} {symbol} "
                 f"(Conf: {decision.confidence}% | "
                 f"Tally: {debate_result.vote_tally})"
             )
         else:
             print(
-                f"    🧠 Single-model decision: {decision.action} {symbol} "
+                f"    >> Single-model decision: {decision.action} {symbol} "
                 f"(Conf: {decision.confidence}%)"
             )
 
@@ -606,7 +606,7 @@ class TradingEngine:
         signal strength and agreement, then use a single model to trade
         the best one.
         """
-        print(f"\n    🔍 Scanning {len(self.non_gold_symbols)} markets in parallel...")
+        print(f"\n    >> Scanning {len(self.non_gold_symbols)} markets in parallel...")
 
         # ── Parallel scan: fetch data + run strategies ────────────────
         market_scores = {}
@@ -644,7 +644,7 @@ class TradingEngine:
                 return symbol, score, signals, df
 
             except Exception as e:
-                print(f"      ⚠️ Scan error for {symbol}: {e}")
+                print(f"      [WARN] Scan error for {symbol}: {e}")
                 return symbol, 0, None, None
 
         with ThreadPoolExecutor(max_workers=min(4, len(self.non_gold_symbols))) as executor:
@@ -657,10 +657,10 @@ class TradingEngine:
                         market_data[symbol] = {"signals": signals, "df": df}
                     print(f"      {symbol}: Score = {score:.1f}")
                 except Exception as e:
-                    print(f"      ⚠️ Scan future error: {e}")
+                    print(f"      [WARN] Scan future error: {e}")
 
         if not market_data:
-            print(f"    📭 No viable secondary markets found this cycle.")
+            print(f"    -- No viable secondary markets found this cycle.")
             return
 
         # ── Pick the best secondary market ────────────────────────────
@@ -668,11 +668,11 @@ class TradingEngine:
         best_score = market_scores[best_symbol]
 
         if best_score < 20:  # Minimum threshold — don't trade garbage setups
-            print(f"    📭 Best market ({best_symbol}: {best_score:.1f}) below threshold. Skipping.")
+            print(f"    -- Best market ({best_symbol}: {best_score:.1f}) below threshold. Skipping.")
             return
 
         self.current_secondary_market = best_symbol
-        print(f"\n    🎯 SELECTED: {best_symbol} (Score: {best_score:.1f})")
+        print(f"\n    >> SELECTED: {best_symbol} (Score: {best_score:.1f})")
 
         # ── Run single-model analysis on the winner ───────────────────
         data = market_data[best_symbol]
@@ -680,13 +680,13 @@ class TradingEngine:
         top_signal = strategy_signals[0]
 
         print(
-            f"    📊 {len(strategy_signals)} signal(s) | Top: "
+            f"    {len(strategy_signals)} signal(s) | Top: "
             f"{top_signal['strategy']} ({top_signal['confidence']}% conf)"
         )
         quant_report = self._format_quant_report(strategy_signals)
 
         # RAG query
-        print(f"    [3b] 🧠 Querying RAG memory for {best_symbol}...")
+        print(f"    [3b] Querying RAG memory for {best_symbol}...")
         market_context = f"Price action context: {top_signal.get('reasoning', '')[:200]}"
 
         with self._lock:
@@ -709,7 +709,7 @@ class TradingEngine:
         )
 
         # Single-model Brain decision (no debate)
-        print(f"    [3c] 🧠 Single-model evaluating {best_symbol}...")
+        print(f"    [3c] Single-model evaluating {best_symbol}...")
         decision = self.brain.evaluate(
             quant_report=quant_report,
             fundamental_report=fundamental_report,
@@ -720,7 +720,7 @@ class TradingEngine:
         )
 
         print(
-            f"    🧠 Decision: {decision.action} {best_symbol} "
+            f"    >> Decision: {decision.action} {best_symbol} "
             f"(Conf: {decision.confidence}%)"
         )
 
@@ -758,7 +758,7 @@ class TradingEngine:
         Runs: Grounding Validator → Risk Agent → Execute Trade.
         """
         # ── Grounding Validator ───────────────────────────────────────
-        print(f"    [V1] 🛡️  Grounding Validator running...")
+        print(f"    [V1] Grounding Validator running...")
         grounding_result = self.validator.validate(
             decision=decision,
             trade_recall=trade_recall,
@@ -768,14 +768,14 @@ class TradingEngine:
 
         grounding_log = self.validator.format_log_entry(grounding_result, decision.action)
         print(
-            f"    🔍 Grounding score: {grounding_result.grounding_score:.2f}/1.00 | "
+            f"    Grounding score: {grounding_result.grounding_score:.2f}/1.00 | "
             f"Checks passed: {len(grounding_result.checks_passed)} | "
             f"Failed: {len(grounding_result.checks_failed)}"
         )
 
         if grounding_result.override_to_hold:
-            print(f"    🛡️  GROUNDING OVERRIDE → HOLD")
-            print(f"    📋 Reason: {grounding_result.override_reason[:200]}")
+            print(f"    [OVERRIDE] GROUNDING -> HOLD")
+            print(f"    Reason: {grounding_result.override_reason[:200]}")
             decision.action = "HOLD"
             with self._lock:
                 self._log_decision(
@@ -793,7 +793,7 @@ class TradingEngine:
 
         # ── HOLD → skip ──────────────────────────────────────────────
         if decision.action == "HOLD":
-            print(f"    ✋ HOLD — No trade for {symbol}.")
+            print(f"    HOLD -- No trade for {symbol}.")
             with self._lock:
                 self._log_decision(
                     decision, "HOLD — Brain decided to wait",
@@ -809,7 +809,7 @@ class TradingEngine:
             return
 
         # ── Risk Agent ────────────────────────────────────────────────
-        print(f"    [V2] 🛡️  Risk Agent evaluating...")
+        print(f"    [V2] Risk Agent evaluating...")
 
         is_trending = any(
             s["confidence"] >= 80 and "Trend" in s.get("strategy", "")
@@ -825,7 +825,7 @@ class TradingEngine:
                 confidence=decision.confidence, equity=equity, is_trending=is_trending,
             )
 
-        print(f"    🛡️  Risk: {risk_result.reason}")
+        print(f"    Risk: {risk_result.reason}")
 
         if not risk_result.approved:
             with self._lock:
@@ -844,7 +844,7 @@ class TradingEngine:
 
         # ── Execute Trade ─────────────────────────────────────────────
         print(
-            f"    [EX] 🚀 EXECUTING: {decision.action} {symbol} "
+            f"    [EX] EXECUTING: {decision.action} {symbol} "
             f"| Lots: {risk_result.adjusted_lot_size}"
         )
 
@@ -866,7 +866,7 @@ class TradingEngine:
                     decision,
                     f"EXECUTED [{order_result['mode']}]: Lots={risk_result.adjusted_lot_size} | "
                     f"Ticket={order_result.get('ticket')}"
-                    f"{' | 🔥 HIGH CONVICTION HOLD ENABLED' if hold_check['allow_extended_hold'] else ''}",
+                    f"{' | HIGH CONVICTION HOLD ENABLED' if hold_check['allow_extended_hold'] else ''}",
                     trade=trade_record, grounding_log=grounding_log,
                     debate_result=debate_result,
                 )
@@ -902,17 +902,17 @@ class TradingEngine:
         Thread-safe: uses self._lock for shared resources.
         """
         print(f"\n  {'═' * 60}")
-        print(f"  [THREAD] 📈 Analyzing {symbol}...")
+        print(f"  [THREAD] Analyzing {symbol}...")
 
         # ── Get market data from MT5 ────────────────────────────────
         try:
             import MetaTrader5 as mt5
             df = self.mt5_fetcher.get_historical_data(symbol, mt5.TIMEFRAME_H1, count=200)
             if df is None or df.empty:
-                print(f"    ⚠️  No data for {symbol}. Skipping.")
+                print(f"    [WARN] No data for {symbol}. Skipping.")
                 return
         except Exception as e:
-            print(f"    ⚠️  MT5 data error for {symbol}: {e}. Skipping.")
+            print(f"    [WARN] MT5 data error for {symbol}: {e}. Skipping.")
             return
 
         # ── Run all strategies (12+) ─────────────────────────────────
@@ -920,18 +920,18 @@ class TradingEngine:
         strategy_signals = run_all_strategies(df, pair=symbol)
 
         if not strategy_signals:
-            print(f"    📭 No signals from any strategy for {symbol}.")
+            print(f"    -- No signals from any strategy for {symbol}.")
             return
 
         top_signal = strategy_signals[0]
         print(
-            f"    📊 {len(strategy_signals)} signal(s) | Top: "
+            f"    {len(strategy_signals)} signal(s) | Top: "
             f"{top_signal['strategy']} ({top_signal['confidence']}% conf)"
         )
         quant_report = self._format_quant_report(strategy_signals)
 
         # ── STEP 3: RAG Memory Query (thread-safe) ────────────────────
-        print(f"    [2b] 🧠 Querying RAG memory for {symbol}...")
+        print(f"    [2b] Querying RAG memory for {symbol}...")
         market_context = (
             f"Price action context: {top_signal.get('reasoning', '')[:200]}"
         )
@@ -965,13 +965,13 @@ class TradingEngine:
 
         cold_start = trade_recall.get("is_cold_start", True)
         print(
-            f"    📚 RAG: {trade_recall['total_found']} trade memories | "
+            f"    RAG: {trade_recall['total_found']} trade memories | "
             f"{news_recall['total_found']} news memories | "
-            f"{'⚠️ COLD START' if cold_start else '✅ History found'}"
+            f"{'[COLD START]' if cold_start else '[OK] History found'}"
         )
 
         # ── STEP 4: Brain (LLM) Decision ─────────────────────────────
-        print(f"    [2c] 🧠 Brain evaluating {symbol} with grounded context...")
+        print(f"    [2c] Brain evaluating {symbol} with grounded context...")
         decision = self.brain.evaluate(
             quant_report=quant_report,
             fundamental_report=fundamental_report,
@@ -982,14 +982,14 @@ class TradingEngine:
         )
 
         print(
-            f"    🧠 Raw decision: {decision.action} {symbol} "
+            f"    >> Raw decision: {decision.action} {symbol} "
             f"(Conf: {decision.confidence}% | "
             f"Hallucination: {decision.hallucination_risk} | "
             f"RAG sources cited: {decision.rag_sources_cited})"
         )
 
         # ── STEP 5: Grounding Validator ───────────────────────────────
-        print(f"    [2d] 🛡️  Grounding Validator running...")
+        print(f"    [2d] Grounding Validator running...")
         grounding_result = self.validator.validate(
             decision=decision,
             trade_recall=trade_recall,
@@ -999,27 +999,27 @@ class TradingEngine:
 
         grounding_log = self.validator.format_log_entry(grounding_result, decision.action)
         print(
-            f"    🔍 Grounding score: {grounding_result.grounding_score:.2f}/1.00 | "
+            f"    Grounding score: {grounding_result.grounding_score:.2f}/1.00 | "
             f"Checks passed: {len(grounding_result.checks_passed)} | "
             f"Failed: {len(grounding_result.checks_failed)}"
         )
 
         if grounding_result.override_to_hold:
-            print(f"    🛡️  GROUNDING OVERRIDE → HOLD")
-            print(f"    📋 Reason: {grounding_result.override_reason[:200]}")
+            print(f"    [OVERRIDE] GROUNDING -> HOLD")
+            print(f"    Reason: {grounding_result.override_reason[:200]}")
             decision.action = "HOLD"
             with self._lock:
                 self._log_decision(decision, f"GROUNDING_OVERRIDE: {grounding_result.override_reason[:150]}", grounding_log=grounding_log)
             return
 
         print(
-            f"    ✅ Grounding passed: {decision.action} {symbol} "
+            f"    [OK] Grounding passed: {decision.action} {symbol} "
             f"(Win rate cited: {decision.historical_win_rate:.1%})"
         )
 
         # ── STEP 6: HOLD → skip ───────────────────────────────────────
         if decision.action == "HOLD":
-            print(f"    ✋ HOLD — No trade for {symbol}.")
+            print(f"    HOLD -- No trade for {symbol}.")
             with self._lock:
                 self._log_decision(decision, "HOLD — Brain decided to wait", grounding_log=grounding_log)
                 self.observation_logger.log_from_cycle_data(
@@ -1035,7 +1035,7 @@ class TradingEngine:
             return
 
         # ── STEP 7: Risk Agent (thread-safe) ─────────────────────────
-        print(f"    [2e] 🛡️  Risk Agent evaluating...")
+        print(f"    [2e] Risk Agent evaluating...")
 
         is_trending = any(
             s["confidence"] >= 80 and "Trend" in s.get("strategy", "")
@@ -1055,7 +1055,7 @@ class TradingEngine:
                 is_trending=is_trending,
             )
 
-        print(f"    🛡️  Risk: {risk_result.reason}")
+        print(f"    Risk: {risk_result.reason}")
 
         if not risk_result.approved:
             with self._lock:
@@ -1075,7 +1075,7 @@ class TradingEngine:
 
         # ── STEP 8: Execute Trade ─────────────────────────────────────
         print(
-            f"    [2f] 🚀 EXECUTING: {decision.action} {symbol} "
+            f"    [2f] EXECUTING: {decision.action} {symbol} "
             f"| Lots: {risk_result.adjusted_lot_size}"
         )
 
@@ -1099,7 +1099,7 @@ class TradingEngine:
                     decision,
                     f"EXECUTED [{order_result['mode']}]: Lots={risk_result.adjusted_lot_size} | "
                     f"Ticket={order_result.get('ticket')}"
-                    f"{' | 🔥 HIGH CONVICTION HOLD ENABLED' if hold_check['allow_extended_hold'] else ''}",
+                    f"{' | HIGH CONVICTION HOLD ENABLED' if hold_check['allow_extended_hold'] else ''}",
                     trade=trade_record,
                     grounding_log=grounding_log
                 )
@@ -1169,7 +1169,7 @@ class TradingEngine:
             cache_seconds = 110           # ~2 min cache
             tavily_interval = 120         # Tavily every 2 min
             use_tavily_now = True         # Always try Tavily in sniper
-            search_tier = "🔴 SNIPER"
+            search_tier = "SNIPER"
             queries = [
                 "forex market breaking news now",
                 "Federal Reserve interest rate decision latest",
@@ -1183,7 +1183,7 @@ class TradingEngine:
             tavily_interval = 7200        # Tavily every 2 hours
             time_since_tavily = (now - self.last_tavily_fetch_time).total_seconds()
             use_tavily_now = time_since_tavily >= tavily_interval
-            search_tier = "🟡 PRE-EVENT"
+            search_tier = "PRE-EVENT"
             
             # Build targeted queries based on upcoming events
             event_names = [e['name'] for e in upcoming_4hr[:3]]
@@ -1197,7 +1197,7 @@ class TradingEngine:
             tavily_interval = 14400       # Tavily once per 4 hours
             time_since_tavily = (now - self.last_tavily_fetch_time).total_seconds()
             use_tavily_now = time_since_tavily >= tavily_interval
-            search_tier = "🟢 NORMAL"
+            search_tier = "NORMAL"
             queries = ["forex and crypto market news today"]
         
         # ── Check cache — skip if fresh data exists ───────────────────
@@ -1217,7 +1217,7 @@ class TradingEngine:
             next_event = upcoming_4hr[0]
             event_info = f" | Next: {next_event['name']} in ~{next_event['minutes_until']:.0f}min"
         
-        print(f"    📡 Search Tier: {search_tier} | Provider: {provider}{event_info}")
+        print(f"    Search Tier: {search_tier} | Provider: {provider}{event_info}")
 
         # ── Execute searches ──────────────────────────────────────────
         all_news: list[dict] = []
@@ -1226,7 +1226,7 @@ class TradingEngine:
                 results = self.web_search.search_news(q, max_results=3)
                 all_news.extend(results)
             except Exception as e:
-                print(f"    ⚠️  Web search failed for '{q}': {e}")
+                print(f"    [WARN] Web search failed for '{q}': {e}")
 
         if not all_news:
             return [], "No news data available. Technical analysis only."
@@ -1374,7 +1374,7 @@ class TradingEngine:
                         f"{'WIN' if pnl > 0 else 'LOSS'} of ${abs(pnl):.2f}"
                     )
                 )
-                print(f"  💾 Trade {trade_id} memorized in RAG DB (PnL: ${pnl:.2f})")
+                print(f"  Trade {trade_id} memorized in RAG DB (PnL: ${pnl:.2f})")
                 
                 # Check Strategy Health and Degradation
                 self.performance_monitor.record_trade_outcome(
@@ -1399,7 +1399,7 @@ class TradingEngine:
     def shutdown(self):
         """Graceful shutdown."""
         self.executor.disconnect()
-        print("\n  🔌 All connections closed.")
+        print("\n  All connections closed.")
 
 
 # ===========================================================================
@@ -1409,7 +1409,7 @@ class TradingEngine:
 def main():
     engine = TradingEngine()
 
-    print("\n🔁 Starting DYNAMIC trading loop.")
+    print("\n>> Starting DYNAMIC trading loop.")
     print("   Normal Mode: 4 hours | Sniper Mode: 2 minutes")
     print("   Press Ctrl+C to stop.\n")
 
@@ -1424,7 +1424,7 @@ def main():
             now = time.time()
             
             if is_sniper:
-                print("\n⚡ HIGH FREQUENCY SNIPER MODE ACTIVE! (High-Impact News Imminent)")
+                print("\n[!] HIGH FREQUENCY SNIPER MODE ACTIVE! (High-Impact News Imminent)")
                 engine.run_cycle(is_high_impact=True)
                 time.sleep(120)  # 2 minute loop during sniper window
                 last_normal_cycle = time.time() # Reset normal timer so it doesn't trigger immediately after sniper ends
@@ -1436,7 +1436,7 @@ def main():
                 time.sleep(1)  # Sleep briefly to prevent 100% CPU usage
                 
     except KeyboardInterrupt:
-        print("\n\n🛑 Received stop signal. Shutting down...")
+        print("\n\n[STOP] Received stop signal. Shutting down...")
         print("   Open positions are NOT closed (SL/TP remain active at broker).")
         print("   Trade log saved to trade_log.json.")
     finally:

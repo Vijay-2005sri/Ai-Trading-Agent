@@ -13,6 +13,7 @@ stable-baselines3 # DRL algorithms
 finrl            # Financial Reinforcement Learning wrapper
 python-dotenv
 pyyaml
-rich             # Terminal Dashboard
+rich             # Terminal formatting
+flask            # Web Dashboard
 pydantic         # Structured output parsing
 sentence-transformers

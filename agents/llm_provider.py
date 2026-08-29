@@ -144,14 +144,14 @@ class LLMProvider:
             "name":     "Groq",
             "base_url": "https://api.groq.com/openai/v1",
             "env_key":  "GROQ_API_KEY",
-            "model":    "llama-3.3-70b-versatile",
+            "model":    "llama-3.1-70b-versatile",
             "is_free":  True,
         },
         {
             "name":     "Google Gemini",
             "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
             "env_key":  "GOOGLE_API_KEY",
-            "model":    "gemini-2.5-flash",
+            "model":    "gemini-3.6-flash",
             "is_free":  True,
         },
         {

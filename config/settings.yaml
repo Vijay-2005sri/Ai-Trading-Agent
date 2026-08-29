@@ -8,12 +8,12 @@ broker:
     - USDJPY
     - AUDUSD
     # Commodities
-    - XAUUSD    # Gold
-    - XAGUSD    # Silver
-    - USOIL     # Crude Oil
-    # Crypto (if available on XM)
-    - BTCUSD
-    - ETHUSD
+    - GOLD.i#    # Gold (was XAUUSD)
+    - SILVER.i#  # Silver (was XAGUSD)
+    - OILCash#   # Crude Oil (was USOIL)
+    # Crypto
+    - BTCUSD#    # Bitcoin (was BTCUSD)
+    - ETHUSD#    # Ethereum (was ETHUSD)
   timeframe: H4   # LLM Brain runs on 4-Hour timeframe
 
 # AI / Brain Settings

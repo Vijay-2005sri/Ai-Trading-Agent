@@ -44,3 +44,4 @@ chat_history.md
 conversation_history.txt
 agents/streak_tracker.json
 trade_log.json
+data/market_observations/

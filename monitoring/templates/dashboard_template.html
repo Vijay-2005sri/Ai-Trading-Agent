@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Vijay's Agent - AI Trading Dashboard with live market monitoring, LLM debate arena, and RAG-grounded decisions.">
+    <title>Vijay's Agent | Live Dashboard</title>
+
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+
+    <!-- Three.js CDN -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+    <!-- Custom Styles -->
+    <link rel="stylesheet" href="/static/dashboard_styles.css">
+</head>
+<body>
+    <!-- Three.js Particle Background -->
+    <canvas id="three-bg"></canvas>
+
+    <div class="dashboard-container">
+
+        <!-- ========== HEADER ========== -->
+        <header class="dashboard-header glass-card animate-in">
+            <div class="header-brand">
+                <div class="status-dot"></div>
+                <div>
+                    <h1>Vijay's Agent</h1>
+                    <div class="subtitle">AI Trading Command Center</div>
+                </div>
+            </div>
+            <div class="header-info">
+                <span class="header-clock" id="server-clock">Loading...</span>
+            </div>
+        </header>
+
+        <!-- ========== KPI CARDS ========== -->
+        <div class="kpi-grid">
+            <div class="glass-card tilt-card kpi-card kpi-cyan animate-in delay-1">
+                <div class="kpi-value" id="kpi-total">0</div>
+                <div class="kpi-label">Total Decisions</div>
+            </div>
+            <div class="glass-card tilt-card kpi-card kpi-green animate-in delay-2">
+                <div class="kpi-value" id="kpi-executed">0</div>
+                <div class="kpi-label">Executed Trades</div>
+            </div>
+            <div class="glass-card tilt-card kpi-card kpi-blue animate-in delay-3">
+                <div class="kpi-value" id="kpi-grounding">0.00</div>
+                <div class="kpi-label">Avg Grounding</div>
+            </div>
+            <div class="glass-card tilt-card kpi-card kpi-purple animate-in delay-4">
+                <div class="kpi-value" id="kpi-debates">0</div>
+                <div class="kpi-label">Debates Done</div>
+            </div>
+        </div>
+
+        <!-- ========== MAIN GRID ========== -->
+        <div class="main-grid">
+
+            <!-- LEFT COLUMN -->
+            <div class="left-column">
+
+                <!-- Recent Decisions -->
+                <div class="glass-card animate-in delay-3">
+                    <div class="panel-title">
+                        <span class="dot"></span>
+                        Recent Brain Decisions
+                    </div>
+                    <div style="overflow-x: auto;">
+                        <table class="decisions-table">
+                            <thead>
+                                <tr>
+                                    <th>Time</th>
+                                    <th>Pair</th>
+                                    <th>Action</th>
+                                    <th>Conf</th>
+                                    <th>Grounding</th>
+                                    <th>RAG Src</th>
+                                    <th>Outcome</th>
+                                </tr>
+                            </thead>
+                            <tbody id="decisions-body">
+                                <tr><td colspan="7" class="empty-state">
+                                    <div class="empty-icon">--</div>
+                                    Waiting for first trading cycle...
+                                </td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Debate Arena -->
+                <div class="glass-card animate-in delay-4">
+                    <div class="panel-title">
+                        <span class="dot" style="background: var(--accent-yellow);"></span>
+                        LLM Debate Arena (Gold)
+                    </div>
+                    <div id="debate-content">
+                        <div class="empty-state">
+                            <div class="empty-icon">--</div>
+                            No debate data yet. Waiting for first Gold analysis cycle...
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- RIGHT COLUMN -->
+            <div class="right-column">
+
+                <!-- RAG Grounding Status -->
+                <div class="glass-card animate-in delay-4">
+                    <div class="panel-title">
+                        <span class="dot" style="background: var(--accent-blue);"></span>
+                        RAG Grounding Status
+                    </div>
+                    <div id="rag-content">
+                        <div class="empty-state">Loading...</div>
+                    </div>
+                </div>
+
+                <!-- System Status -->
+                <div class="glass-card animate-in delay-5">
+                    <div class="panel-title">
+                        <span class="dot" style="background: var(--accent-purple);"></span>
+                        System Status
+                    </div>
+                    <div id="system-content">
+                        <div class="empty-state">Loading...</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ========== FOOTER ========== -->
+        <footer class="dashboard-footer animate-in delay-6">
+            Vijay's Agent | Auto-refreshes every 5s | Bot continues running independently
+        </footer>
+
+    </div>
+
+    <!-- Dashboard App Script -->
+    <script src="/static/dashboard_app.js"></script>
+</body>
+</html>

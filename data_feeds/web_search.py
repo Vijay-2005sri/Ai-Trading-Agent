@@ -14,7 +14,7 @@ If Tavily fails (quota exhausted, rate limit), auto-fallback to DuckDuckGo.
 import os
 
 try:
-    from duckduckgo_search import DDGS
+    from ddgs import DDGS
     _HAS_DDGS = True
 except ImportError:
     _HAS_DDGS = False
