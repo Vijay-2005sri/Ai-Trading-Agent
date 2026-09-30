@@ -25,8 +25,8 @@ RAG Grounding Contract:
 import os
 import time
 import json
-from typing import Optional
-from pydantic import BaseModel, Field
+from typing import Optional, Literal
+from pydantic import BaseModel, Field, UUID4, model_validator
 from openai import OpenAI
 
 
@@ -42,13 +42,15 @@ class TradeDecision(BaseModel):
     to it. The GroundingValidator will cross-check these IDs against ChromaDB.
     Fabricated IDs or empty lists will trigger an automatic HOLD override.
     """
-    action: str = Field(
+    action: Literal["BUY", "SELL", "HOLD"] = Field(
         description="BUY, SELL, or HOLD. Must be consistent with the RAG historical evidence."
     )
     pair: str = Field(
         description="The trading pair, e.g., EURUSD"
     )
+    candidate_id: UUID4 | None = Field(default=None, description="Echo the SELECTED candidate_id exactly for BUY/SELL. HOLD may omit it.")
     confidence: int = Field(
+        ge=0, le=100, strict=True,
         description="Confidence score 0-100. Must be LOWER if RAG win rate is below 55% or cold-start."
     )
     reasoning: str = Field(
@@ -62,9 +64,11 @@ class TradeDecision(BaseModel):
         )
     )
     suggested_sl: float = Field(
+        allow_inf_nan=False,
         description="Suggested Stop Loss price. Must be non-zero for BUY/SELL."
     )
     suggested_tp: float = Field(
+        allow_inf_nan=False,
         description="Suggested Take Profit price. Must be non-zero for BUY/SELL."
     )
     strategy_used: str = Field(
@@ -80,6 +84,7 @@ class TradeDecision(BaseModel):
     )
     historical_win_rate: float = Field(
         default=0.0,
+        ge=0, le=1, allow_inf_nan=False,
         description=(
             "Copy the win rate EXACTLY as stated in the RAG VERIFIED TRADE MEMORY block. "
             "Do NOT invent or estimate. If no RAG history, use 0.0."
@@ -95,6 +100,12 @@ class TradeDecision(BaseModel):
             "Be HONEST — HIGH risk will safely override to HOLD."
         )
     )
+
+    @model_validator(mode="after")
+    def executable_candidate(self):
+        if self.action != "HOLD" and self.candidate_id is None:
+            raise ValueError("BUY/SELL requires selected candidate_id")
+        return self
 
 
 # =============================================================================

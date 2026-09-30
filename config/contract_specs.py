@@ -2,15 +2,11 @@
 =============================================================================
 CONTRACT SPECIFICATIONS — Pip/Point Values Per Instrument (XM MT5)
 =============================================================================
-This is the MASTER REFERENCE FILE for the Risk Agent.
-
-BEFORE placing any trade, the Risk Agent reads this file to know:
-  1. What is 1 pip worth for this symbol?
-  2. What is the minimum pip size (1 pip = X price movement)?
-  3. How do we calculate lot size from pips to achieve exact $ risk?
-
-All values verified against industry standards for XM Global MT5.
-The bot will ALSO call mt5.symbol_info() at runtime to confirm live specs.
+UNVERIFIED REFERENCE ONLY. These legacy examples are not account-specific broker
+metadata, sizing approval or execution authority. Runtime metadata comes only from
+broker_mt5.instruments. Pip conventions and dollar examples below are illustrative;
+actual economics vary by account currency and broker contract. Unknown names fail
+instead of inheriting guessed forex/crypto/metal values.
 
 Formula for every instrument:
   Risk Amount ($) = Lot Size × Pip Value Per Lot × SL in Pips
@@ -239,31 +235,12 @@ HIGH_VOLATILITY_MARKETS = {
 
 def get_contract_spec(symbol: str) -> dict:
     """
-    Returns the contract specification for a given symbol.
-    Falls back to a generic forex spec if symbol not found.
+    Return a copy of an exact, unverified reference entry, never live metadata.
     """
     spec = CONTRACT_SPECS.get(symbol)
     if spec:
-        return spec
-
-    # Fallback: detect from symbol name
-    if "JPY" in symbol:
-        return {"pip_size": 0.01, "pip_value": 6.5, "contract_size": 100_000,
-                "min_lot": 0.01, "lot_step": 0.01, "market_type": "forex",
-                "volatility": "slow_steady", "notes": "JPY pair fallback."}
-    if "BTC" in symbol or "ETH" in symbol or "LTC" in symbol:
-        return {"pip_size": 1.0, "pip_value": 1.0, "contract_size": 1,
-                "min_lot": 0.01, "lot_step": 0.01, "market_type": "crypto",
-                "volatility": "high_volatility", "notes": "Crypto fallback."}
-    if "XAU" in symbol or "XAG" in symbol:
-        return {"pip_size": 0.10, "pip_value": 10.0, "contract_size": 100,
-                "min_lot": 0.01, "lot_step": 0.01, "market_type": "commodity",
-                "volatility": "high_volatility", "notes": "Metal fallback."}
-
-    # Generic forex fallback
-    return {"pip_size": 0.0001, "pip_value": 10.0, "contract_size": 100_000,
-            "min_lot": 0.01, "lot_step": 0.01, "market_type": "forex",
-            "volatility": "slow_steady", "notes": "Generic forex fallback."}
+        return {**spec, "source": "unverified_reference", "execution_eligible": False}
+    raise ValueError(f"No reference specification for exact symbol {symbol!r}")
 
 
 def calculate_lot_size(
@@ -271,31 +248,11 @@ def calculate_lot_size(
     risk_amount_dollars: float,
     sl_in_pips: float
 ) -> float:
-    """
-    Calculates the exact lot size so that hitting the Stop Loss
-    costs exactly risk_amount_dollars.
-
-    Formula: Lot Size = Risk($) / (Pip Value/Lot × SL Pips)
-
-    Example (Gold):
-        risk_amount_dollars = $15 (1.5% of $1000)
-        sl_in_pips = 15 pips
-        pip_value = $10/lot
-        lot_size = 15 / (10 × 15) = 15 / 150 = 0.10 lots ✓
-    """
-    spec = get_contract_spec(symbol)
-    pip_value_per_lot = spec["pip_value"]
-
-    if sl_in_pips <= 0 or pip_value_per_lot <= 0:
-        return spec["min_lot"]
-
-    raw_lot = risk_amount_dollars / (pip_value_per_lot * sl_in_pips)
-
-    # Round down to nearest lot step
-    lot_step = spec["lot_step"]
-    lot_size = max(spec["min_lot"], round(raw_lot - (raw_lot % lot_step), 2))
-
-    return lot_size
+    """Reject the unsafe historical estimator; use verified account metadata."""
+    raise ValueError(
+        "Static contract specs cannot size orders; use core.position_sizer.size_position "
+        "with a broker-verified InstrumentSnapshot"
+    )
 
 
 def dollars_to_pips(symbol: str, dollar_move: float, lot_size: float) -> float:
@@ -341,28 +298,4 @@ if __name__ == "__main__":
     for sym in CONTRACT_SPECS:
         print(get_pip_summary(sym))
 
-    print("\n=== LOT SIZE CALCULATION TEST ===\n")
-
-    # Test: Gold — $1000 account, 1.5% risk ($15), 15-pip SL
-    lot = calculate_lot_size("XAUUSD", 15.0, 15)
-    print(f"Gold  — Risk $15, SL=15pips → Lot: {lot} | "
-          f"SL cost: ${pips_to_dollars('XAUUSD', 15, lot):.2f} | "
-          f"TP@70pips: ${pips_to_dollars('XAUUSD', 70, lot):.2f}")
-
-    # Test: EURUSD — $1000 account, 2% risk ($20), 20-pip SL
-    lot = calculate_lot_size("EURUSD", 20.0, 20)
-    print(f"EUR/USD — Risk $20, SL=20pips → Lot: {lot} | "
-          f"SL cost: ${pips_to_dollars('EURUSD', 20, lot):.2f} | "
-          f"TP@50pips: ${pips_to_dollars('EURUSD', 50, lot):.2f}")
-
-    # Test: Silver — $1000 account, 1.5% risk ($15), 15-pip SL
-    lot = calculate_lot_size("XAGUSD", 15.0, 15)
-    print(f"Silver — Risk $15, SL=15pips → Lot: {lot} | "
-          f"SL cost: ${pips_to_dollars('XAGUSD', 15, lot):.2f} | "
-          f"TP@70pips: ${pips_to_dollars('XAGUSD', 70, lot):.2f}")
-
-    # Test: BTC — $1000 account, 1.5% risk ($15), 1000-pip SL
-    lot = calculate_lot_size("BTCUSD", 15.0, 1000)
-    print(f"Bitcoin — Risk $15, SL=1000pips → Lot: {lot} | "
-          f"SL cost: ${pips_to_dollars('BTCUSD', 1000, lot):.2f} | "
-          f"TP@7000pips: ${pips_to_dollars('BTCUSD', 7000, lot):.2f}")
+    print("\nOrder sizing requires a broker-verified InstrumentSnapshot.")

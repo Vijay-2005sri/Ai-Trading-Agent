@@ -1,0 +1,13 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra --strict-config --strict-markers -p no:cacheprovider"
+norecursedirs = ["references", ".venv", ".git"]
+
+[tool.ruff]
+target-version = "py314"
+extend-exclude = ["references", ".venv"]
+
+[tool.ruff.lint]
+# Expand to legacy source deliberately; no mass cleanup in the baseline task.
+select = ["E4", "E7", "E9", "F"]

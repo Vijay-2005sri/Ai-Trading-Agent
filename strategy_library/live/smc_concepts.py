@@ -15,24 +15,12 @@ The output is a list of TradeSignal dicts that the Executive Agent can act on.
 =============================================================================
 """
 
+from core.signals import TradeSignal
+
 import pandas as pd
 import numpy as np
-from dataclasses import dataclass, asdict
+from dataclasses import asdict
 from typing import Optional
-
-
-@dataclass
-class TradeSignal:
-    strategy: str
-    direction: str        # "BUY" or "SELL"
-    pair: str
-    entry_price: float
-    stop_loss: float
-    take_profit: float
-    risk_reward: float
-    confidence: int       # 0-100
-    reasoning: str
-    timestamp: str
 
 
 class SMCStrategy:

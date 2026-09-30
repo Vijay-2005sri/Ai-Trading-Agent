@@ -141,7 +141,12 @@ def run_all_strategies(df: pd.DataFrame, pair: str = "EURUSD") -> list[dict]:
     """
     Runs every registered LIVE strategy against the given OHLCV DataFrame.
     Returns a list of trade signal dicts, sorted by confidence (highest first).
+    Engine callers supply canonical pairs; broker-profile resolution belongs upstream.
     """
+    from broker_mt5.symbols import SymbolRegistry
+    pair = SymbolRegistry().canonical(pair)
+    from core.trade_constructor import candidate_from_signal
+    from uuid import uuid4
     all_signals = []
 
     for name, StrategyClass in STRATEGY_REGISTRY.items():
@@ -149,12 +154,21 @@ def run_all_strategies(df: pd.DataFrame, pair: str = "EURUSD") -> list[dict]:
             strategy = StrategyClass(pair=pair)
             signals = strategy.generate_signals(df)
             for sig in signals:
-                all_signals.append(asdict(sig))
+                row = asdict(sig)
+                if row["pair"] != pair:
+                    raise ValueError("Strategy emitted wrong instrument")
+                row["signal_label"] = str(row["strategy"])[:100]
+                row["strategy"] = name
+                row["candidate_id"] = str(uuid4())
+                candidate = candidate_from_signal(row, STRATEGY_REGISTRY)
+                row["risk_reward"] = float(abs(candidate.take_profit - candidate.entry_price) / abs(candidate.entry_price - candidate.stop_loss))
+                all_signals.append(row)
         except Exception as e:
             print(f"[WARN] Strategy '{name}' failed: {e}")
 
     # Sort by confidence descending
-    all_signals.sort(key=lambda x: x.get("confidence", 0), reverse=True)
+    all_signals.sort(key=lambda x: (-x["confidence"], x["strategy"], x["direction"],
+                                   x["entry_price"], x["stop_loss"], x["take_profit"], x["timestamp"], x["reasoning"]))
     return all_signals
 
 

@@ -105,6 +105,7 @@ class DebateResult:
                     "confidence": d.confidence,
                     "reasoning": d.reasoning[:200],
                     "strategy_used": d.strategy_used,
+                    "candidate_id": str(d.candidate_id) if d.candidate_id else None,
                 }
                 for name, d in self.round1_decisions.items()
             },
@@ -567,6 +568,7 @@ class DebateArena:
 
         winning_decision = TradeDecision(
             action=winning_action,
+            candidate_id=base_decision.candidate_id,
             pair=base_decision.pair,
             confidence=avg_confidence,
             reasoning=combined_reasoning[:500],

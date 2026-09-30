@@ -21,24 +21,11 @@ BREAKOUT STRATEGY:
 =============================================================================
 """
 
+from core.signals import TradeSignal
+
 import pandas as pd
 import numpy as np
-from dataclasses import dataclass
 from typing import Optional
-
-
-@dataclass
-class TradeSignal:
-    strategy: str
-    direction: str
-    pair: str
-    entry_price: float
-    stop_loss: float
-    take_profit: float
-    risk_reward: float
-    confidence: int
-    reasoning: str
-    timestamp: str
 
 
 class EMACrossoverStrategy:

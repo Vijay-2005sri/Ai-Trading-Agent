@@ -1,6 +1,9 @@
 # Trading Settings
 broker:
-  demo_mode: true
+  # Fail closed until the real paper adapter is implemented (task 2.4).
+  mode: paper
+  demo_mode: true  # Legacy safety flag; false is rejected, never enables live.
+  enable_demo_orders: false  # Only an explicit demo_mt5 test profile may enable.
   symbols:
     # Forex
     - EURUSD
@@ -8,13 +11,36 @@ broker:
     - USDJPY
     - AUDUSD
     # Commodities
-    - GOLD.i#    # Gold (was XAUUSD)
-    - SILVER.i#  # Silver (was XAGUSD)
-    - OILCash#   # Crude Oil (was USOIL)
+    - XAUUSD
+    - XAGUSD
+    - USOIL
     # Crypto
-    - BTCUSD#    # Bitcoin (was BTCUSD)
-    - ETHUSD#    # Ethereum (was ETHUSD)
+    - BTCUSD
+    - ETHUSD
+  # Explicit native names; only the MT5 adapters use these spellings.
+  symbol_map:
+    EURUSD: EURUSD
+    GBPUSD: GBPUSD
+    USDJPY: USDJPY
+    AUDUSD: AUDUSD
+    XAUUSD: "GOLD.i#"
+    XAGUSD: "SILVER.i#"
+    USOIL: "OILCash#"
+    BTCUSD: "BTCUSD#"
+    ETHUSD: "ETHUSD#"
+  pre_trade_gateway:
+    quote_max_age_seconds: 2.0
+    approval_ttl_seconds: 3.0
+    max_spread_points: 50
+    max_entry_deviation_points: 100
+    request_deviation_points: 10
   timeframe: H4   # LLM Brain runs on 4-Hour timeframe
+
+# Local transactional journal. Null selects LOCALAPPDATA/AITradingAgent/journal.db
+# on Windows (outside this OneDrive tree), or ~/.local/state/AITradingAgent elsewhere.
+# An explicit path must be on a local, non-synchronized disk.
+storage:
+  journal_path: null
 
 # AI / Brain Settings
 llm:
@@ -27,9 +53,11 @@ llm:
 # =============================================================================
 risk:
   # --- Per-Trade Risk ---
-  risk_per_trade_default: 0.02       # 2% when capital <= $2000
-  risk_per_trade_high_capital: 0.015  # 1.5% when capital > $2000
-  high_capital_threshold: 2000        # Dollar threshold to switch risk %
+  risk_per_trade_default: 0.02       # 2% at/below the account-currency threshold
+  risk_per_trade_high_capital: 0.015  # 1.5% above the account-currency threshold
+  high_capital_threshold: 2000        # Account-currency threshold to switch risk %
+  sizing_cost_allowance_per_lot: 0.0  # Estimated fees/slippage per lot in account-currency units; zero reserves none
+  sizing_cost_currency: "USD"         # Must match broker account currency whenever the allowance is nonzero
 
   # --- Max Drawdown ---
   max_drawdown_from_peak: 0.05       # 5% max drawdown from equity peak → HALT ALL TRADING

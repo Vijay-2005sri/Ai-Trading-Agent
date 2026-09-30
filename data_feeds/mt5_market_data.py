@@ -64,7 +64,9 @@ class MT5DataFetcher:
         r"C:\Program Files (x86)\MetaTrader 5\terminal64.exe",
     ]
 
-    def __init__(self, login, password, server, path=None):
+    def __init__(self, login, password, server, path=None, *, symbol_registry=None):
+        from broker_mt5.symbols import SymbolRegistry
+        self.symbol_registry = symbol_registry or SymbolRegistry()
         self.login = login
         self.password = password
         self.server = server
@@ -342,6 +344,7 @@ class MT5DataFetcher:
         MT5 requires symbols to be selected (visible) before you can
         fetch data for them. This is a common cause of "no data" errors.
         """
+        symbol = self.symbol_registry.broker_symbol(symbol)
         if symbol in self._selected_symbols:
             return True  # Already selected this session
 
@@ -384,6 +387,7 @@ class MT5DataFetcher:
           4. If fails → reconnect with backoff → retry
           5. Returns DataFrame or None
         """
+        symbol = self.symbol_registry.broker_symbol(symbol)
         # Quick bail-out if connection is known dead and circuit breaker is active
         if not self._connection_alive:
             if not self._reconnect_with_backoff():
@@ -434,6 +438,7 @@ class MT5DataFetcher:
           4. If fails → reconnect with backoff → retry
           5. Returns dict or None
         """
+        symbol = self.symbol_registry.broker_symbol(symbol)
         # Quick bail-out if connection is known dead and circuit breaker is active
         if not self._connection_alive:
             if not self._reconnect_with_backoff():
@@ -490,6 +495,7 @@ class MT5DataFetcher:
             "issues": ["list of problems found"]
           }
         """
+        symbols = self.symbol_registry.active_symbols(symbols)
         result = {
             "connected": False,
             "terminal_running": False,

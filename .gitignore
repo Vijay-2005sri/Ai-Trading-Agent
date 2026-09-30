@@ -45,3 +45,9 @@ conversation_history.txt
 agents/streak_tracker.json
 trade_log.json
 data/market_observations/
+
+# Local architecture references; never application dependencies.
+references/
+*.db-journal
+*.db-wal
+*.db-shm

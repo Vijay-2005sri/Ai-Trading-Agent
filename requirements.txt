@@ -7,6 +7,7 @@ ta               # Technical Analysis Library
 chromadb         # RAG Vector Database
 openai           # Pure LLM API client (Groq, Gemini, OpenRouter, DeepSeek)
 tavily-python    # Better Web Search API
+ddgs             # DuckDuckGo fallback used by data_feeds/web_search.py
 transformers     # FinBERT and Time-Series
 torch            # PyTorch backend for Transformers/DRL
 stable-baselines3 # DRL algorithms

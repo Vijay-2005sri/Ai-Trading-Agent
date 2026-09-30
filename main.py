@@ -49,6 +49,15 @@ Complete data flow every cycle:
 
 import os
 import sys
+import hashlib
+from broker_mt5.symbols import SymbolRegistry, SymbolError
+from uuid import uuid4
+from core.events import EventEnvelope
+from core.models import RunRecord
+from core.trade_constructor import (bind_context, candidate_from_signal, evidence_json,
+                                    validate_binding, construct_trade, ConstructionError)
+from core.persistence import Journal, JournalError, default_journal_path
+from core.time_service import SystemClock
 
 # Force UTF-8 encoding on Windows to prevent emoji crashes (cp1252 can't handle them)
 if sys.platform == "win32":
@@ -66,6 +75,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
+from config.execution_mode import DevelopmentPolicy, ModeError, demo_credentials_from_environment
 
 # ── Load environment ────────────────────────────────────────────────────────
 load_dotenv()
@@ -82,7 +92,7 @@ from data_feeds.web_search import WebSearchAgent
 from data_feeds.news_sentiment import NewsSentimentAnalyzer
 from data_feeds.economic_calendar import EconomicCalendar
 
-from strategy_library.strategy_master import run_all_strategies, get_strategy_summary
+from strategy_library.strategy_master import run_all_strategies, get_strategy_summary, STRATEGY_REGISTRY
 from data.observation_logger import ObservationLogger
 from monitoring.performance_monitor import PerformanceMonitor
 
@@ -94,6 +104,7 @@ from rag_system.memory_engine import TradingRAG
 from rag_system.grounding_validator import GroundingValidator
 
 from broker_mt5.order_executor import OrderExecutor
+from broker_mt5.execution_gateway import GatewayError
 
 
 # ===========================================================================
@@ -102,8 +113,11 @@ from broker_mt5.order_executor import OrderExecutor
 
 def load_config() -> dict:
     config_path = Path(__file__).parent / "config" / "settings.yaml"
-    with open(config_path, "r") as f:
-        return yaml.safe_load(f)
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            return yaml.safe_load(f)
+    except (OSError, yaml.YAMLError):
+        raise ModeError("Cannot read valid config/settings.yaml; startup blocked") from None
 
 
 # ===========================================================================
@@ -170,7 +184,8 @@ class TradingBrain:
                 rag_context=rag_context,
                 output_schema=TradeDecision
             )
-            decision.pair = pair  # Ensure pair is always set correctly
+            if decision.action == "HOLD":
+                decision.pair = pair
             return decision
 
         except Exception as e:
@@ -225,7 +240,8 @@ class TradingBrain:
             )
 
             if debate_result.winning_decision is not None:
-                debate_result.winning_decision.pair = pair
+                if debate_result.winning_decision.action == "HOLD":
+                    debate_result.winning_decision.pair = pair
                 return debate_result.winning_decision, debate_result
 
             # Debate failed (< 2 models available) — fallback to single model
@@ -266,35 +282,69 @@ class TradingEngine:
     Pipeline: data_feeds → strategy_library → rag_system → agents → broker_mt5 → monitoring
     """
 
-    def __init__(self):
+    def __init__(self, *, clock=None):
+        self.clock = clock or SystemClock()
+        self.journal = None
+        self._active_run_id = None
+        self._cycle_guard = threading.Lock()
+        self.executor = None
+        try:
+            self._initialize()
+        except BaseException:
+            # A later feed/model/store failure must not leave a verified session
+            # active after construction aborts. Preserve the original failure.
+            if self.executor is not None:
+                try:
+                    self.executor.disconnect()
+                except Exception:
+                    pass
+            if self.journal is not None:
+                try:
+                    self.journal.close()
+                except Exception:
+                    print("[ERR] Journal cleanup failed during startup failure")
+            raise
+
+    def _initialize(self):
         print("=" * 65)
         print("  ADVANCED AI TRADING AGENT — FULLY INTEGRATED SYSTEM")
         print("=" * 65)
 
         # ── Config ──────────────────────────────────────────────────────────
         self.config    = load_config()
-        self.symbols   = self.config["broker"]["symbols"]
-        self.demo_mode = self.config["broker"].get("demo_mode", True)
+        self.execution_policy = DevelopmentPolicy.from_config(self.config)
+        self.execution_policy.require_demo_session()
+        credentials = demo_credentials_from_environment()
+        self.symbol_registry = SymbolRegistry.from_config(self.config)
+        self.symbols = self.symbol_registry.active_symbols(self.config["broker"].get("symbols"))
+        self.demo_mode = True  # Compatibility: only verified demo accounts are supported.
+        storage = self.config.get("storage", {})
+        if not isinstance(storage, dict):
+            raise JournalError("storage must be a mapping")
+        journal_path = storage.get("journal_path")
+        if journal_path is not None and (not isinstance(journal_path, str) or not journal_path.strip()):
+            raise JournalError("storage.journal_path must be a nonempty path or null")
+        self.journal = Journal(journal_path or default_journal_path(), clock=self.clock)
+        self.executor = OrderExecutor(
+            symbol_registry=self.symbol_registry,
+            clock=self.clock,
+            mode=self.execution_policy.mode.value,
+            enable_demo_orders=self.execution_policy.enable_demo_orders,
+            gateway_config=self.config.get("broker", {}).get("pre_trade_gateway", {}),
+        )
+        if not self.executor.connect(**credentials):
+            raise ModeError("Demo MT5 connection could not be verified; startup stopped")
 
         # ── Data Feeds ──────────────────────────────────────────────────────
         print("\n[1/7] Initializing Data Feeds...")
-        self.mt5_fetcher = MT5DataFetcher(
-            login=int(os.getenv("MT5_LOGIN", "0")),
-            password=os.getenv("MT5_PASSWORD", ""),
-            server=os.getenv("MT5_SERVER", "XMGlobal-MT5"),
-            path=os.getenv("MT5_PATH", None)
-        )
-        self.web_search = WebSearchAgent(use_tavily=bool(os.getenv("TAVILY_API_KEY")))
-        self.sentiment_analyzer = None  # Lazy load — FinBERT is heavy
-        self.calendar = EconomicCalendar()
-        self.calendar.fetch_calendar()
-        print("  [OK] Web Search Agent ready")
-        print("  [OK] Economic Calendar loaded")
-        print("  [..] FinBERT will load on first news analysis")
-
         # ── MT5 Auto-Connect & Health Check ──────────────────────────────
         print("\n  -- MT5 Auto-Connect & Health Check...")
+        self.mt5_fetcher = MT5DataFetcher(**credentials, symbol_registry=self.symbol_registry)
         mt5_connected = self.mt5_fetcher.connect()
+        if not mt5_connected:
+            raise ModeError("Demo market-data connection failed; startup stopped")
+        # Feed initialization can change the process-global terminal session.
+        self.executor.assert_demo_session()
         if mt5_connected:
             health = self.mt5_fetcher.health_check(self.symbols)
             if health["issues"]:
@@ -330,15 +380,18 @@ class TradingEngine:
             if acct:
                 print(f"  [$] Account: {acct['login']} | Balance: ${acct['balance']:.2f} | "
                       f"Equity: ${acct['equity']:.2f} | Mode: {acct['trade_mode']}")
-        else:
-            print("  [WARN] MT5 connection failed — bot will attempt reconnection each cycle.")
-            print("     The self-healing system will auto-launch and reconnect as needed.")
         print("  [OK] MT5 Data Fetcher ready (self-healing enabled)")
+        self.executor.assert_demo_session()
+
+        self.web_search = WebSearchAgent(use_tavily=bool(os.getenv("TAVILY_API_KEY")))
+        self.sentiment_analyzer = None  # Lazy load — FinBERT is heavy
+        self.calendar = EconomicCalendar()
+        self.calendar.fetch_calendar()
 
         # ── RAG Memory System ───────────────────────────────────────────────
         print("\n[2/7] Initializing RAG Memory System...")
         rag_db_path = self.config.get("rag", {}).get("db_path", "rag_system/chroma_db")
-        self.rag    = TradingRAG(db_path=rag_db_path)
+        self.rag    = TradingRAG(db_path=rag_db_path, symbol_registry=self.symbol_registry)
 
         # ── Grounding Validator ─────────────────────────────────────────────
         self.validator = GroundingValidator()
@@ -368,18 +421,13 @@ class TradingEngine:
 
         # ── Risk Agent ───────────────────────────────────────────────────────
         print("\n[6/7] Initializing Risk Agent...")
-        self.risk_agent = RiskAgent(self.config)
+        self.risk_agent = RiskAgent(self.config, symbol_registry=self.symbol_registry)
+        self.executor.bind_risk_agent(self.risk_agent)
         print("  [OK] Risk Agent ready")
 
         # ── Order Executor (Broker) ─────────────────────────────────────────
         print("\n[7/7] Initializing Order Executor...")
-        self.executor = OrderExecutor(demo_mode=self.demo_mode)
-        self.executor.connect(
-            login=int(os.getenv("MT5_LOGIN", "0")),
-            password=os.getenv("MT5_PASSWORD", ""),
-            server=os.getenv("MT5_SERVER", "XMGlobal-MT5"),
-            path=os.getenv("MT5_PATH", None)
-        )
+        self.executor.assert_demo_session()
         print("  [OK] Order Executor ready")
 
         # ── Trade Log ────────────────────────────────────────────────────────
@@ -404,7 +452,7 @@ class TradingEngine:
         # ── Summary ──────────────────────────────────────────────────────────
         rag_stats = self.rag.get_db_stats()
         print("\n" + "=" * 65)
-        print(f"  [ONLINE] Mode: {'DEMO' if self.demo_mode else '[!] LIVE'}")
+        print(f"  [ONLINE] Mode: {self.execution_policy.mode.value.upper()}")
         print(f"  [T1] Primary Market: {self.gold_symbol} (Multi-LLM Debate)")
         print(f"  [T2] Secondary Pool: {', '.join(self.non_gold_symbols)} ({len(self.non_gold_symbols)} candidates)")
         print(f"  [AI] Debate Models: {len(self._debate_model_names)} active")
@@ -443,6 +491,35 @@ class TradingEngine:
     # =======================================================================
 
     def run_cycle(self, is_high_impact: bool = False):
+        """Persist cycle boundaries; concurrent cycles cannot share correlation state."""
+        if not self._cycle_guard.acquire(blocking=False):
+            raise RuntimeError("An analysis cycle is already running")
+        try:
+            run = RunRecord(mode=self.execution_policy.mode, purpose="analysis_cycle", created_at=self.clock.now_utc())
+            started = EventEnvelope(event_type="AnalysisRunStarted", source="engine", run_id=run.run_id,
+                                    mode=run.mode, occurred_at=self.clock.now_utc())
+            self.journal.commit(run=run, events=[started])
+            self._active_run_id = run.run_id
+            try:
+                self._run_cycle_body(is_high_impact)
+            except BaseException as error:
+                try:
+                    self.journal.commit(events=[EventEnvelope(
+                        event_type="AnalysisRunFailed", source="engine", run_id=run.run_id,
+                        mode=run.mode, occurred_at=self.clock.now_utc(), causation_id=started.event_id,
+                        payload={"error_type": type(error).__name__})])
+                except Exception:
+                    print("[ERR] Failed to persist cycle failure; original error retained")
+                raise
+            else:
+                self.journal.commit(events=[EventEnvelope(
+                    event_type="AnalysisRunCompleted", source="engine", run_id=run.run_id,
+                    mode=run.mode, occurred_at=self.clock.now_utc(), causation_id=started.event_id)])
+        finally:
+            self._active_run_id = None
+            self._cycle_guard.release()
+
+    def _run_cycle_body(self, is_high_impact: bool = False):
         """
         One full analysis cycle — TWO-TIER ARCHITECTURE:
 
@@ -476,7 +553,8 @@ class TradingEngine:
         print(f"\n  {'═' * 60}")
         print(f"  [STEP 2] TIER 1: GOLD ({self.gold_symbol}) -- Multi-LLM Debate")
         print(f"  {'═' * 60}")
-        self._process_gold_with_debate(fundamental_report)
+        if self.gold_symbol in self.symbols:
+            self._process_gold_with_debate(fundamental_report)
 
         # ── STEP 3: TIER 2 — Secondary Market Selection ──────────────────
         if self.non_gold_symbols:
@@ -523,11 +601,12 @@ class TradingEngine:
             return
 
         top_signal = strategy_signals[0]
+        selected_candidate = candidate_from_signal(top_signal, STRATEGY_REGISTRY)
         print(
             f"    {len(strategy_signals)} signal(s) | Top: "
             f"{top_signal['strategy']} ({top_signal['confidence']}% conf)"
         )
-        quant_report = self._format_quant_report(strategy_signals)
+        quant_report = self._format_quant_report(strategy_signals, selected_candidate)
 
         # ── RAG Memory Query ─────────────────────────────────────────
         print(f"    [2b] Querying RAG memory for {symbol}...")
@@ -535,16 +614,17 @@ class TradingEngine:
 
         with self._lock:
             trade_recall = self.rag.recall_similar_trades(
-                pair=symbol, strategy=top_signal["strategy"],
+                pair=symbol, strategy=selected_candidate.strategy,
                 current_context=market_context, n_results=5
             )
             news_recall = self.rag.recall_similar_news(
                 query_text=fundamental_report[:300], pair=symbol, n_results=3
             )
             actual_win_rate = self.rag.get_strategy_win_rate(
-                pair=symbol, strategy=top_signal["strategy"]
+                pair=symbol, strategy=selected_candidate.strategy
             )
 
+        candidate_context = bind_context(selected_candidate, trade_recall, news_recall, actual_win_rate, STRATEGY_REGISTRY)
         rag_context = (
             f"{trade_recall['summary']}\n\n"
             f"{news_recall['summary']}\n\n"
@@ -585,6 +665,7 @@ class TradingEngine:
 
         # ── From here, same pipeline as before: Grounding → Risk → Execute
         self._execute_validated_trade(
+            candidate_context=candidate_context,
             symbol=symbol,
             decision=decision,
             strategy_signals=strategy_signals,
@@ -678,12 +759,13 @@ class TradingEngine:
         data = market_data[best_symbol]
         strategy_signals = data["signals"]
         top_signal = strategy_signals[0]
+        selected_candidate = candidate_from_signal(top_signal, STRATEGY_REGISTRY)
 
         print(
             f"    {len(strategy_signals)} signal(s) | Top: "
             f"{top_signal['strategy']} ({top_signal['confidence']}% conf)"
         )
-        quant_report = self._format_quant_report(strategy_signals)
+        quant_report = self._format_quant_report(strategy_signals, selected_candidate)
 
         # RAG query
         print(f"    [3b] Querying RAG memory for {best_symbol}...")
@@ -691,16 +773,17 @@ class TradingEngine:
 
         with self._lock:
             trade_recall = self.rag.recall_similar_trades(
-                pair=best_symbol, strategy=top_signal["strategy"],
+                pair=best_symbol, strategy=selected_candidate.strategy,
                 current_context=market_context, n_results=5
             )
             news_recall = self.rag.recall_similar_news(
                 query_text=fundamental_report[:300], pair=best_symbol, n_results=3
             )
             actual_win_rate = self.rag.get_strategy_win_rate(
-                pair=best_symbol, strategy=top_signal["strategy"]
+                pair=best_symbol, strategy=selected_candidate.strategy
             )
 
+        candidate_context = bind_context(selected_candidate, trade_recall, news_recall, actual_win_rate, STRATEGY_REGISTRY)
         rag_context = (
             f"{trade_recall['summary']}\n\n"
             f"{news_recall['summary']}\n\n"
@@ -726,6 +809,7 @@ class TradingEngine:
 
         # ── Execute through the standard pipeline ─────────────────────
         self._execute_validated_trade(
+            candidate_context=candidate_context,
             symbol=best_symbol,
             decision=decision,
             strategy_signals=strategy_signals,
@@ -752,11 +836,26 @@ class TradingEngine:
         actual_win_rate,
         fundamental_report: str,
         debate_result=None,
+        candidate_context=None,
     ):
         """
         Shared pipeline for both Gold (Tier 1) and Secondary (Tier 2).
         Runs: Grounding Validator → Risk Agent → Execute Trade.
         """
+        decision = decision.model_copy(deep=True)
+        symbol = self.symbol_registry.canonical(symbol)
+        decision.pair = self.symbol_registry.canonical(decision.pair)
+        if decision.pair != symbol:
+            raise SymbolError("Decision instrument does not match selected instrument")
+        if decision.action != "HOLD":
+            try:
+                validate_binding(candidate_context, decision, top_signal, strategy_signals,
+                                 evidence_json(trade_recall, news_recall, actual_win_rate), STRATEGY_REGISTRY)
+            except (ConstructionError, ValueError) as error:
+                decision.action = "HOLD"
+                with self._lock:
+                    self._log_decision(decision, f"CONSTRUCTION_REJECTED: {error}", debate_result=debate_result)
+                return
         # ── Grounding Validator ───────────────────────────────────────
         print(f"    [V1] Grounding Validator running...")
         grounding_result = self.validator.validate(
@@ -808,22 +907,76 @@ class TradingEngine:
                 )
             return
 
-        # ── Risk Agent ────────────────────────────────────────────────
-        print(f"    [V2] Risk Agent evaluating...")
-
-        is_trending = any(
-            s["confidence"] >= 80 and "Trend" in s.get("strategy", "")
-            for s in strategy_signals
-        )
-        equity = self.executor.get_account_equity()
-
-        with self._lock:
-            risk_result = self.risk_agent.evaluate_trade(
-                pair=decision.pair, direction=decision.action,
-                entry_price=top_signal.get("entry_price", 0),
-                stop_loss=decision.suggested_sl, take_profit=decision.suggested_tp,
-                confidence=decision.confidence, equity=equity, is_trending=is_trending,
+        # ── Fresh quote preparation ──────────────────────────────────
+        try:
+            spec = self.executor.get_instrument_spec(symbol)
+            validate_binding(candidate_context, decision, top_signal, strategy_signals,
+                             evidence_json(trade_recall, news_recall, actual_win_rate), STRATEGY_REGISTRY)
+            constructed = construct_trade(candidate_context, spec, minimum_rr=self.risk_agent.min_rr)
+            preparation = self.executor.prepare_trade(
+                pair=constructed.pair, direction=constructed.direction,
+                reference_entry=constructed.entry_price, stop_loss=constructed.stop_loss,
+                take_profit=constructed.take_profit, minimum_rr=self.risk_agent.min_rr,
+                contract_revision=constructed.contract_revision,
+                candidate_id=str(constructed.candidate_id), strategy_id=constructed.strategy,
+                evidence_digest=constructed.evidence_digest,
             )
+        except (ConstructionError, ModeError, GatewayError) as error:
+            decision.action = "HOLD"
+            with self._lock:
+                self._log_decision(decision, f"PRE_TRADE_GATEWAY_REJECTED: {error}", grounding_log=grounding_log,
+                                   debate_result=debate_result)
+            return
+        grounding_log["construction"] = {
+            "candidate": candidate_context.candidate.model_dump(mode="json"),
+            "constructed": constructed.model_dump(mode="json"),
+            "broker_symbol": spec.broker_symbol, "tick_size": str(spec.trade_tick_size),
+            "metadata_observed_at": spec.observed_at.isoformat(),
+        }
+        grounding_log["quote_preparation"] = {
+            "bid": str(preparation.bid), "ask": str(preparation.ask),
+            "entry_price": str(preparation.entry_price),
+            "quote_time": preparation.quote_time.isoformat(),
+            "risk_reward": str(preparation.risk_reward),
+        }
+        print(f"    [V2] Fresh quote and final risk approval...")
+
+        is_trending = candidate_context.candidate.confidence >= 80 and "Trend" in constructed.strategy
+        source_record = TradeRecord(
+            trade_id=f"{symbol}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+            pair=constructed.pair, direction=constructed.direction,
+            entry_price=float(preparation.entry_price), stop_loss=float(preparation.stop_loss),
+            take_profit=float(preparation.take_profit), lot_size=0.0,
+            open_time=preparation.quote_time.isoformat(),
+            candidate_id=str(constructed.candidate_id), strategy_id=constructed.strategy,
+            contract_revision=constructed.contract_revision, evidence_digest=constructed.evidence_digest,
+        )
+        try:
+            # Serialize final risk, broker checks and the one-shot send together
+            # so another analysis cannot spend the same in-memory risk state.
+            with self._lock:
+                authorization = self.executor.authorize_trade(
+                    preparation, source_record, confidence=decision.confidence,
+                    is_trending=is_trending,
+                )
+                risk_result = authorization.risk_result
+                if authorization.approved:
+                    trade_record = authorization.trade_record
+                    order_result = self.executor.place_order(
+                        trade_record, approval_token=authorization.token)
+                    if order_result["success"]:
+                        # Commit in-memory exposure before releasing the same
+                        # lock that guarded sizing and the native send.
+                        self.risk_agent.record_trade_opened(trade_record)
+        except (GatewayError, ModeError) as error:
+            with self._lock:
+                self._log_decision(decision, f"PRE_TRADE_GATEWAY_REJECTED: {error}",
+                                   grounding_log=grounding_log, debate_result=debate_result)
+            return
+
+        if risk_result is not None and risk_result.sizing is not None:
+            grounding_log["position_sizing"] = risk_result.sizing
+        grounding_log["gateway_approval"] = authorization.audit
 
         print(f"    Risk: {risk_result.reason}")
 
@@ -834,6 +987,17 @@ class TradingEngine:
                     grounding_log=grounding_log, debate_result=debate_result,
                 )
             return
+
+        if not authorization.approved:
+            with self._lock:
+                self._log_decision(
+                    decision, f"PRE_TRADE_GATEWAY_REJECTED: {authorization.reason}",
+                    grounding_log=grounding_log, debate_result=debate_result,
+                )
+            return
+
+        if trade_record.sizing_provenance:
+            grounding_log["position_sizing"] = trade_record.sizing_provenance
 
         # ── High Conviction Hold Check ────────────────────────────────
         hold_check = self.risk_agent.check_high_conviction_hold(
@@ -848,20 +1012,8 @@ class TradingEngine:
             f"| Lots: {risk_result.adjusted_lot_size}"
         )
 
-        trade_record = TradeRecord(
-            trade_id=f"{symbol}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
-            pair=symbol, direction=decision.action,
-            entry_price=top_signal.get("entry_price", 0),
-            stop_loss=decision.suggested_sl, take_profit=decision.suggested_tp,
-            lot_size=risk_result.adjusted_lot_size,
-            open_time=datetime.now().isoformat(),
-        )
-
-        order_result = self.executor.place_order(trade_record)
-
         with self._lock:
             if order_result["success"]:
-                self.risk_agent.record_trade_opened(trade_record)
                 self._log_decision(
                     decision,
                     f"EXECUTED [{order_result['mode']}]: Lots={risk_result.adjusted_lot_size} | "
@@ -886,8 +1038,8 @@ class TradingEngine:
                 decision_confidence=decision.confidence,
                 grounding_score=grounding_result.grounding_score,
                 rag_win_rate=actual_win_rate,
-                entry_price=top_signal.get("entry_price", 0),
-                stop_loss=decision.suggested_sl, take_profit=decision.suggested_tp,
+                entry_price=trade_record.entry_price,
+                stop_loss=trade_record.stop_loss, take_profit=trade_record.take_profit,
                 timeframe="H1"
             )
 
@@ -901,6 +1053,7 @@ class TradingEngine:
         Full analysis pipeline for a single symbol.
         Thread-safe: uses self._lock for shared resources.
         """
+        symbol = self.symbol_registry.canonical(symbol)
         print(f"\n  {'═' * 60}")
         print(f"  [THREAD] Analyzing {symbol}...")
 
@@ -924,11 +1077,12 @@ class TradingEngine:
             return
 
         top_signal = strategy_signals[0]
+        selected_candidate = candidate_from_signal(top_signal, STRATEGY_REGISTRY)
         print(
             f"    {len(strategy_signals)} signal(s) | Top: "
             f"{top_signal['strategy']} ({top_signal['confidence']}% conf)"
         )
-        quant_report = self._format_quant_report(strategy_signals)
+        quant_report = self._format_quant_report(strategy_signals, selected_candidate)
 
         # ── STEP 3: RAG Memory Query (thread-safe) ────────────────────
         print(f"    [2b] Querying RAG memory for {symbol}...")
@@ -939,7 +1093,7 @@ class TradingEngine:
         with self._lock:
             trade_recall = self.rag.recall_similar_trades(
                 pair=symbol,
-                strategy=top_signal["strategy"],
+                strategy=selected_candidate.strategy,
                 current_context=market_context,
                 n_results=5
             )
@@ -952,10 +1106,11 @@ class TradingEngine:
 
             actual_win_rate = self.rag.get_strategy_win_rate(
                 pair=symbol,
-                strategy=top_signal["strategy"]
+                strategy=selected_candidate.strategy
             )
 
         # Build the combined grounded context block for LLM
+        candidate_context = bind_context(selected_candidate, trade_recall, news_recall, actual_win_rate, STRATEGY_REGISTRY)
         rag_context = (
             f"{trade_recall['summary']}\n\n"
             f"{news_recall['summary']}\n\n"
@@ -988,149 +1143,12 @@ class TradingEngine:
             f"RAG sources cited: {decision.rag_sources_cited})"
         )
 
-        # ── STEP 5: Grounding Validator ───────────────────────────────
-        print(f"    [2d] Grounding Validator running...")
-        grounding_result = self.validator.validate(
-            decision=decision,
-            trade_recall=trade_recall,
-            news_recall=news_recall,
-            actual_win_rate=actual_win_rate
+        self._execute_validated_trade(
+            candidate_context=candidate_context,
+            symbol=symbol, decision=decision, strategy_signals=strategy_signals,
+            top_signal=top_signal, trade_recall=trade_recall, news_recall=news_recall,
+            actual_win_rate=actual_win_rate, fundamental_report=fundamental_report,
         )
-
-        grounding_log = self.validator.format_log_entry(grounding_result, decision.action)
-        print(
-            f"    Grounding score: {grounding_result.grounding_score:.2f}/1.00 | "
-            f"Checks passed: {len(grounding_result.checks_passed)} | "
-            f"Failed: {len(grounding_result.checks_failed)}"
-        )
-
-        if grounding_result.override_to_hold:
-            print(f"    [OVERRIDE] GROUNDING -> HOLD")
-            print(f"    Reason: {grounding_result.override_reason[:200]}")
-            decision.action = "HOLD"
-            with self._lock:
-                self._log_decision(decision, f"GROUNDING_OVERRIDE: {grounding_result.override_reason[:150]}", grounding_log=grounding_log)
-            return
-
-        print(
-            f"    [OK] Grounding passed: {decision.action} {symbol} "
-            f"(Win rate cited: {decision.historical_win_rate:.1%})"
-        )
-
-        # ── STEP 6: HOLD → skip ───────────────────────────────────────
-        if decision.action == "HOLD":
-            print(f"    HOLD -- No trade for {symbol}.")
-            with self._lock:
-                self._log_decision(decision, "HOLD — Brain decided to wait", grounding_log=grounding_log)
-                self.observation_logger.log_from_cycle_data(
-                    symbol=symbol,
-                    strategy_signals=strategy_signals,
-                    decision_action=decision.action,
-                    decision_reasoning=decision.reasoning,
-                    decision_confidence=decision.confidence,
-                    grounding_score=grounding_result.grounding_score,
-                    rag_win_rate=actual_win_rate,
-                    timeframe="H1"
-                )
-            return
-
-        # ── STEP 7: Risk Agent (thread-safe) ─────────────────────────
-        print(f"    [2e] Risk Agent evaluating...")
-
-        is_trending = any(
-            s["confidence"] >= 80 and "Trend" in s.get("strategy", "")
-            for s in strategy_signals
-        )
-        equity = self.executor.get_account_equity()
-
-        with self._lock:
-            risk_result = self.risk_agent.evaluate_trade(
-                pair=decision.pair,
-                direction=decision.action,
-                entry_price=top_signal.get("entry_price", 0),
-                stop_loss=decision.suggested_sl,
-                take_profit=decision.suggested_tp,
-                confidence=decision.confidence,
-                equity=equity,
-                is_trending=is_trending,
-            )
-
-        print(f"    Risk: {risk_result.reason}")
-
-        if not risk_result.approved:
-            with self._lock:
-                self._log_decision(
-                    decision,
-                    f"VETOED by Risk Agent: {risk_result.reason}",
-                    grounding_log=grounding_log
-                )
-            return
-
-        # ── STEP 7b: High Conviction Hold Check ──────────────────────
-        hold_check = self.risk_agent.check_high_conviction_hold(
-            pair=symbol, confidence=decision.confidence
-        )
-        if hold_check["allow_extended_hold"]:
-            print(f"    {hold_check['reason']}")
-
-        # ── STEP 8: Execute Trade ─────────────────────────────────────
-        print(
-            f"    [2f] EXECUTING: {decision.action} {symbol} "
-            f"| Lots: {risk_result.adjusted_lot_size}"
-        )
-
-        trade_record = TradeRecord(
-            trade_id=f"{symbol}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
-            pair=symbol,
-            direction=decision.action,
-            entry_price=top_signal.get("entry_price", 0),
-            stop_loss=decision.suggested_sl,
-            take_profit=decision.suggested_tp,
-            lot_size=risk_result.adjusted_lot_size,
-            open_time=datetime.now().isoformat(),
-        )
-
-        order_result = self.executor.place_order(trade_record)
-
-        with self._lock:
-            if order_result["success"]:
-                self.risk_agent.record_trade_opened(trade_record)
-                self._log_decision(
-                    decision,
-                    f"EXECUTED [{order_result['mode']}]: Lots={risk_result.adjusted_lot_size} | "
-                    f"Ticket={order_result.get('ticket')}"
-                    f"{' | HIGH CONVICTION HOLD ENABLED' if hold_check['allow_extended_hold'] else ''}",
-                    trade=trade_record,
-                    grounding_log=grounding_log
-                )
-                print(f"    ✅ Order placed: {order_result['reason']}")
-            else:
-                print(f"    ❌ Order failed: {order_result['reason']}")
-                self._log_decision(
-                    decision,
-                    f"ORDER_FAILED: {order_result['reason']}",
-                    grounding_log=grounding_log
-                )
-
-        # ── STEP 9: Log Observation for Pattern Miner ─────────────────
-        with self._lock:
-            self.observation_logger.log_from_cycle_data(
-                symbol=symbol,
-                strategy_signals=strategy_signals,
-                decision_action=decision.action,
-                decision_reasoning=decision.reasoning,
-                decision_confidence=decision.confidence,
-                grounding_score=grounding_result.grounding_score,
-                rag_win_rate=actual_win_rate,
-                entry_price=top_signal.get("entry_price", 0),
-                stop_loss=decision.suggested_sl,
-                take_profit=decision.suggested_tp,
-                timeframe="H1"
-            )
-
-    # =======================================================================
-    # HELPERS
-    # =======================================================================
 
     def _gather_fundamentals(self, is_high_impact: bool = False) -> tuple[list[dict], str]:
         """
@@ -1281,9 +1299,14 @@ class TradingEngine:
         
         return all_news, report
 
-    def _format_quant_report(self, signals: list[dict]) -> str:
+    def _format_quant_report(self, signals: list[dict], selected_candidate=None) -> str:
         """Format strategy signals into a readable report for the LLM."""
         lines = [f"Total signals generated: {len(signals)}\n"]
+        if selected_candidate is not None:
+            lines.append(f"SELECTED candidate_id={selected_candidate.candidate_id}; "
+                         f"pair={selected_candidate.pair}; strategy={selected_candidate.strategy}; "
+                         f"side={selected_candidate.direction}. BUY/SELL must echo this exact identity. "
+                         "Otherwise choose HOLD. Other signals are context only. SL/TP suggestions are advisory.")
         for i, sig in enumerate(signals[:5]):
             lines.append(
                 f"#{i+1} [{sig['strategy']}] {sig.get('direction','?')} | "
@@ -1304,10 +1327,21 @@ class TradingEngine:
         grounding_log: dict = None,
         debate_result=None,
     ):
-        """Log every decision with full XAI audit trail to trade_log.json."""
+        """Commit audit evidence before updating the legacy JSON projection."""
+        now = self.clock.now_utc()
+        decision.pair = self.symbol_registry.canonical(decision.pair)
+        run = None if self._active_run_id else RunRecord(
+            mode=self.execution_policy.mode, purpose="decision", created_at=now)
+        run_id = self._active_run_id or run.run_id
+        event_id = uuid4()
         entry = {
-            "timestamp":       datetime.now().isoformat(),
+            "timestamp":       now.isoformat(),
+            "run_id":          str(run_id),
+            "event_id":        str(event_id),
+            "candidate_id":    str(decision.candidate_id) if decision.candidate_id else None,
+            "advisory_prices": {"sl": str(decision.suggested_sl)[:100], "tp": str(decision.suggested_tp)[:100]},
             "pair":            decision.pair,
+            "broker_symbol":   self.symbol_registry.broker_symbol(decision.pair),
             "action":          decision.action,
             "confidence":      decision.confidence,
             "reasoning":       decision.reasoning,
@@ -1326,6 +1360,7 @@ class TradingEngine:
                 "entry_price": trade.entry_price,
                 "stop_loss":   trade.stop_loss,
                 "take_profit": trade.take_profit,
+                "sizing":      trade.sizing_provenance,
             }
 
         # Include debate transcript if this was a Gold debate decision
@@ -1338,6 +1373,23 @@ class TradingEngine:
                     "models_participated": getattr(debate_result, "models_participated", []),
                 }
 
+        # Full transcripts remain in the compatibility projection. Persist a
+        # bounded summary plus a digest of the exact entry for correlation.
+        document = json.dumps(entry, sort_keys=True, ensure_ascii=False, allow_nan=False)
+        summary = {key: entry[key] for key in ("timestamp", "run_id", "event_id", "action", "confidence")}
+        for key in ("pair", "broker_symbol", "outcome", "strategy_used", "llm_provider", "reasoning"):
+            summary[key] = str(entry[key])[:1000]
+        summary["entry_sha256"] = hashlib.sha256(document.encode("utf-8")).hexdigest()
+        summary["candidate_id"] = entry["candidate_id"]
+        if grounding_log and "construction" in grounding_log:
+            summary["construction"] = grounding_log["construction"]
+        if grounding_log and "position_sizing" in grounding_log:
+            summary["position_sizing"] = grounding_log["position_sizing"]
+        if "trade" in entry:
+            summary["trade"] = entry["trade"]
+        self.journal.commit(run=run, events=[EventEnvelope(
+            event_id=event_id, event_type="DecisionRecorded", source="engine", run_id=run_id,
+            mode=self.execution_policy.mode, occurred_at=now, payload=summary)])
         self.trade_log.append(entry)
         self._save_trade_log()
 
@@ -1359,6 +1411,7 @@ class TradingEngine:
                 trade_data = {
                     "trade_id":     trade_id,
                     "pair":         entry["pair"],
+                    "broker_symbol": entry.get("broker_symbol"),
                     "strategy_used": entry["strategy_used"],
                     "direction":    entry["action"],
                     "entry_price":  entry.get("trade", {}).get("entry_price", 0),
@@ -1398,7 +1451,19 @@ class TradingEngine:
 
     def shutdown(self):
         """Graceful shutdown."""
-        self.executor.disconnect()
+        try:
+            if self.executor is not None:
+                self.executor.disconnect()
+        except BaseException:
+            if self.journal is not None:
+                try:
+                    self.journal.close()
+                except Exception:
+                    print("[ERR] Journal cleanup also failed")
+            raise
+        else:
+            if self.journal is not None:
+                self.journal.close()
         print("\n  All connections closed.")
 
 
@@ -1407,17 +1472,19 @@ class TradingEngine:
 # ===========================================================================
 
 def main():
-    engine = TradingEngine()
+    try:
+        engine = TradingEngine()
+    except (ModeError, JournalError) as error:
+        print(f"[BLOCKED] {error}")
+        return 1
 
     print("\n>> Starting DYNAMIC trading loop.")
     print("   Normal Mode: 4 hours | Sniper Mode: 2 minutes")
     print("   Press Ctrl+C to stop.\n")
 
-    # Run immediately on startup
-    engine.run_cycle(is_high_impact=False)
-    last_normal_cycle = time.time()
-
     try:
+        engine.run_cycle(is_high_impact=False)
+        last_normal_cycle = time.time()
         while True:
             # Check if we are near a high-impact news event
             is_sniper = engine.calendar.is_news_sniper_window()
@@ -1444,4 +1511,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

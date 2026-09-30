@@ -1,0 +1,16 @@
+# Dependencies imported by the current application.
+# requirements.txt also lists research libraries not used by this checkout.
+MetaTrader5
+pandas
+numpy
+chromadb
+openai
+tavily-python
+ddgs
+transformers
+torch
+python-dotenv
+pyyaml
+flask
+pydantic>=2
+sentence-transformers

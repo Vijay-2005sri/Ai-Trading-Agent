@@ -18,12 +18,13 @@ Rules Enforced:
 =============================================================================
 """
 
+import math
 import json
-import os
-from pathlib import Path
 from datetime import datetime, date
-from dataclasses import dataclass, field, asdict
-from typing import Optional
+from dataclasses import dataclass
+from pathlib import Path
+
+from core.position_sizer import SizingError, decimal_value, size_position
 
 
 @dataclass
@@ -36,6 +37,7 @@ class RiskCheckResult:
     max_trades_today: int
     current_drawdown_pct: float
     equity: float
+    sizing: dict | None = None
 
 
 @dataclass
@@ -51,6 +53,11 @@ class TradeRecord:
     status: str = "open"      # open, closed_win, closed_loss
     open_time: str = ""
     close_time: str = ""
+    candidate_id: str | None = None
+    strategy_id: str | None = None
+    contract_revision: str | None = None
+    evidence_digest: str | None = None
+    sizing_provenance: dict | None = None
 
 
 class RiskAgent:
@@ -71,17 +78,6 @@ class RiskAgent:
     """
 
     # -----------------------------------------------------------------
-    # SYMBOL-SPECIFIC RISK OVERRIDES
-    # -----------------------------------------------------------------
-    # These override the default/high-capital risk percentage for
-    # specific instruments. Silver (XAGUSD) always uses 2% risk
-    # regardless of account size, because its per-pip value is lower.
-    # -----------------------------------------------------------------
-    SYMBOL_RISK_OVERRIDES = {
-        "XAGUSD": 0.02,   # Silver: always 2%, never reduced to 1.5%
-    }
-
-    # -----------------------------------------------------------------
     # HIGH CONVICTION HOLD — Cheap Commodity Extension
     # -----------------------------------------------------------------
     # For instruments with cheap per-pip costs (USOIL, XAGUSD), if
@@ -93,13 +89,18 @@ class RiskAgent:
         "USOIL":  {"min_confidence": 90, "max_hold_hours": 24},
     }
 
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, *, symbol_registry=None):
+        from broker_mt5.symbols import SymbolRegistry
+        self.symbol_registry = symbol_registry or SymbolRegistry.from_config(config)
         risk_cfg = config.get("risk", {})
 
         # --- Per-Trade Risk ---
         self.risk_pct_default = risk_cfg.get("risk_per_trade_default", 0.02)
         self.risk_pct_high_capital = risk_cfg.get("risk_per_trade_high_capital", 0.015)
+        # The threshold is denominated in the verified account currency.
         self.high_capital_threshold = risk_cfg.get("high_capital_threshold", 2000)
+        self.cost_allowance_per_lot = risk_cfg.get("sizing_cost_allowance_per_lot", 0)
+        self.cost_allowance_currency = risk_cfg.get("sizing_cost_currency", "USD")
 
         # --- Drawdown Limits ---
         self.max_drawdown = risk_cfg.get("max_drawdown_from_peak", 0.05)
@@ -132,37 +133,34 @@ class RiskAgent:
         self.trades_today: list[TradeRecord] = []
         self.open_positions: list[TradeRecord] = []
         self.current_date = date.today()
-        
-        # --- Streak Tracker ---
+        # Retain the legacy storage location for daily-equity continuity. Any
+        # old consecutive_wins value is deliberately ignored for sizing.
         self.streak_file = Path(__file__).parent / "streak_tracker.json"
-        self.consecutive_wins = 0
         self._load_streak()
 
     def _load_streak(self):
-        if self.streak_file.exists():
-            try:
-                data = json.loads(self.streak_file.read_text(encoding="utf-8"))
-                self.consecutive_wins = data.get("consecutive_wins", 0)
-                saved_date_str = data.get("current_date")
-                if saved_date_str:
-                    saved_date = date.fromisoformat(saved_date_str)
-                    # If we loaded a date from the past, we handle rollover in evaluate_trade
-                    if saved_date > self.current_date:
-                        self.current_date = saved_date
-                self.start_of_day_equity = data.get("start_of_day_equity", 0.0)
-            except Exception as e:
-                print(f"Failed to load streak tracker: {e}")
+        try:
+            data = json.loads(self.streak_file.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                return
+            saved_date = data.get("current_date")
+            parsed_date = date.fromisoformat(saved_date) if saved_date else None
+            baseline = decimal_value(data.get("start_of_day_equity", 0), "saved day equity")
+            if parsed_date == self.current_date and baseline > 0 and math.isfinite(float(baseline)):
+                self.start_of_day_equity = float(baseline)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            pass
 
     def _save_streak(self):
         try:
-            data = {
-                "consecutive_wins": self.consecutive_wins,
+            self.streak_file.write_text(json.dumps({
+                # Kept only for backwards-compatible readers; always ignored.
+                "consecutive_wins": 0,
                 "current_date": self.current_date.isoformat(),
-                "start_of_day_equity": self.start_of_day_equity
-            }
-            self.streak_file.write_text(json.dumps(data, indent=4), encoding="utf-8")
-        except Exception as e:
-            print(f"Failed to save streak tracker: {e}")
+                "start_of_day_equity": self.start_of_day_equity,
+            }, indent=4), encoding="utf-8")
+        except OSError:
+            pass
 
     # -------------------------------------------------------------------
     # CORE: Evaluate a trade proposal
@@ -171,212 +169,171 @@ class RiskAgent:
         self,
         pair: str,
         direction: str,
-        entry_price: float,
-        stop_loss: float,
-        take_profit: float,
+        entry_price,
+        stop_loss,
+        take_profit,
         confidence: int,
-        equity: float,
+        equity,
         is_trending: bool = False,
-        pip_value: float = 10.0  # Default pip value for standard lot
+        instrument_snapshot=None,
     ) -> RiskCheckResult:
-        """
-        The main method. Returns an approved/rejected result with exact lot size.
-        """
+        """Apply deterministic gates and size against account-currency stop loss."""
+        try:
+            equity_decimal = decimal_value(equity, "equity")
+            equity_number = float(equity_decimal)
+            if equity_decimal <= 0 or not math.isfinite(equity_number):
+                raise SizingError("equity must be finite and positive")
+        except (SizingError, OverflowError, ValueError, TypeError):
+            return RiskCheckResult(
+                approved=False, adjusted_lot_size=0.0,
+                reason="REJECTED: equity must be finite and positive",
+                risk_pct_used=0, trades_today=len(self.trades_today),
+                max_trades_today=0, current_drawdown_pct=0.0, equity=0.0,
+            )
+
+        pair = self.symbol_registry.canonical(pair)
         # Reset daily counter if it's a new day
         today = date.today()
         if today > self.current_date:
-            # Process yesterday's PnL
-            if self.start_of_day_equity > 0:
-                if equity > self.start_of_day_equity:
-                    self.consecutive_wins += 1
-                    print(f"📈 Profitable day yesterday! Streak is now {self.consecutive_wins} days.")
-                elif equity < self.start_of_day_equity:
-                    self.consecutive_wins = 0
-                    print("📉 Loss day yesterday. Streak reset to 0.")
-                    
             self.trades_today = []
-            self.start_of_day_equity = equity
+            self.start_of_day_equity = equity_number
             self.current_date = today
             self._save_streak()
 
         # Update peak equity
-        if equity > self.peak_equity:
-            self.peak_equity = equity
+        if equity_number > self.peak_equity:
+            self.peak_equity = equity_number
         if self.start_of_day_equity == 0:
-            self.start_of_day_equity = equity
+            self.start_of_day_equity = equity_number
             self._save_streak()
+
+        def rejected(reason, *, max_today=0, drawdown=None):
+            return RiskCheckResult(
+                approved=False, adjusted_lot_size=0.0, reason=reason,
+                risk_pct_used=0, trades_today=len(self.trades_today),
+                max_trades_today=max_today,
+                current_drawdown_pct=(drawdown_from_peak if drawdown is None else drawdown),
+                equity=equity_number,
+            )
 
         # -----------------------------------------------------------
         # CHECK 1: Max Drawdown from Peak (5%)
         # -----------------------------------------------------------
-        drawdown_from_peak = (self.peak_equity - equity) / self.peak_equity if self.peak_equity > 0 else 0
+        drawdown_from_peak = ((self.peak_equity - equity_number) / self.peak_equity
+                              if self.peak_equity > 0 else 0)
         if drawdown_from_peak >= self.max_drawdown:
-            return RiskCheckResult(
-                approved=False,
-                adjusted_lot_size=0.0,
-                reason=f"🛑 HALTED: Drawdown from peak is {drawdown_from_peak*100:.1f}% (max allowed: {self.max_drawdown*100:.0f}%). ALL TRADING STOPPED.",
-                risk_pct_used=0,
-                trades_today=len(self.trades_today),
-                max_trades_today=0,
-                current_drawdown_pct=drawdown_from_peak,
-                equity=equity
-            )
+            return rejected(f"HALTED: drawdown {drawdown_from_peak:.1%} reached maximum {self.max_drawdown:.1%}", drawdown=drawdown_from_peak)
 
         # -----------------------------------------------------------
         # CHECK 2: Daily Drawdown
         # -----------------------------------------------------------
-        daily_dd = (self.start_of_day_equity - equity) / self.start_of_day_equity if self.start_of_day_equity > 0 else 0
+        daily_dd = ((self.start_of_day_equity - equity_number) / self.start_of_day_equity
+                    if self.start_of_day_equity > 0 else 0)
         size_multiplier = 1.0
 
         if daily_dd >= self.daily_dd_halt:
-            return RiskCheckResult(
-                approved=False,
-                adjusted_lot_size=0.0,
-                reason=f"🛑 DAILY HALT: Today's drawdown is {daily_dd*100:.1f}% (halt threshold: {self.daily_dd_halt*100:.0f}%). No more trades today.",
-                risk_pct_used=0,
-                trades_today=len(self.trades_today),
-                max_trades_today=0,
-                current_drawdown_pct=drawdown_from_peak,
-                equity=equity
-            )
+            return rejected(f"DAILY HALT: drawdown {daily_dd:.1%} reached halt threshold {self.daily_dd_halt:.1%}", drawdown=drawdown_from_peak)
         elif daily_dd >= self.daily_dd_reduce:
-            size_multiplier = 0.5  # Reduce size by 50%
+            size_multiplier = 0.5
 
         # -----------------------------------------------------------
         # CHECK 3: Minimum Confidence
         # -----------------------------------------------------------
         if confidence < self.min_confidence:
-            return RiskCheckResult(
-                approved=False,
-                adjusted_lot_size=0.0,
-                reason=f"⚠️ REJECTED: Confidence {confidence}% is below minimum {self.min_confidence}%. Not worth the risk.",
-                risk_pct_used=0,
-                trades_today=len(self.trades_today),
-                max_trades_today=self._get_max_trades(is_trending, confidence),
-                current_drawdown_pct=drawdown_from_peak,
-                equity=equity
-            )
+            return rejected(f"REJECTED: confidence {confidence}% is below minimum {self.min_confidence}%",
+                            max_today=self._get_max_trades(is_trending, confidence), drawdown=drawdown_from_peak)
 
         # -----------------------------------------------------------
         # CHECK 4: Trade Count Limit (2 default, 3 if trending)
         # -----------------------------------------------------------
         max_trades = self._get_max_trades(is_trending, confidence)
         if len(self.trades_today) >= max_trades:
-            return RiskCheckResult(
-                approved=False,
-                adjusted_lot_size=0.0,
-                reason=f"⚠️ REJECTED: Already took {len(self.trades_today)} trades today (max: {max_trades}). Done for the day.",
-                risk_pct_used=0,
-                trades_today=len(self.trades_today),
-                max_trades_today=max_trades,
-                current_drawdown_pct=drawdown_from_peak,
-                equity=equity
-            )
+            return rejected(f"REJECTED: daily trade count reached maximum {max_trades}",
+                            max_today=max_trades, drawdown=drawdown_from_peak)
 
         # -----------------------------------------------------------
         # CHECK 5: Open Positions Limit
         # -----------------------------------------------------------
         if len(self.open_positions) >= self.max_open_positions:
-            return RiskCheckResult(
-                approved=False,
-                adjusted_lot_size=0.0,
-                reason=f"⚠️ REJECTED: Already {len(self.open_positions)} positions open (max: {self.max_open_positions}).",
-                risk_pct_used=0,
-                trades_today=len(self.trades_today),
-                max_trades_today=max_trades,
-                current_drawdown_pct=drawdown_from_peak,
-                equity=equity
-            )
+            return rejected(f"REJECTED: open position count reached maximum {self.max_open_positions}",
+                            max_today=max_trades, drawdown=drawdown_from_peak)
 
         # -----------------------------------------------------------
         # CHECK 6: Stop Loss & Take Profit must exist
         # -----------------------------------------------------------
-        if self.require_sl and (stop_loss is None or stop_loss == 0):
-            return RiskCheckResult(
-                approved=False, adjusted_lot_size=0.0,
-                reason="🛑 REJECTED: No Stop Loss provided. Every trade MUST have a Stop Loss.",
-                risk_pct_used=0, trades_today=len(self.trades_today),
-                max_trades_today=max_trades, current_drawdown_pct=drawdown_from_peak, equity=equity
-            )
-
-        if self.require_tp and (take_profit is None or take_profit == 0):
-            return RiskCheckResult(
-                approved=False, adjusted_lot_size=0.0,
-                reason="🛑 REJECTED: No Take Profit provided. Every trade MUST have a Take Profit.",
-                risk_pct_used=0, trades_today=len(self.trades_today),
-                max_trades_today=max_trades, current_drawdown_pct=drawdown_from_peak, equity=equity
-            )
+        try:
+            entry = decimal_value(entry_price, "entry price")
+            stop = decimal_value(stop_loss, "stop loss")
+            target = decimal_value(take_profit, "take profit")
+            if entry <= 0 or stop <= 0 or target <= 0:
+                raise SizingError("entry, stop and target must be positive")
+            if direction not in ("BUY", "SELL"):
+                raise SizingError("direction must be BUY or SELL")
+        except SizingError as error:
+            return rejected(f"REJECTED: invalid trade geometry ({error})", max_today=max_trades)
+        if self.require_sl and stop == 0:
+            return rejected("REJECTED: stop loss is required", max_today=max_trades)
+        if self.require_tp and target == 0:
+            return rejected("REJECTED: take profit is required", max_today=max_trades)
+        if ((direction == "BUY" and not (stop < entry < target))
+                or (direction == "SELL" and not (target < entry < stop))):
+            return rejected("REJECTED: stop/target must match the trade direction", max_today=max_trades)
 
         # -----------------------------------------------------------
         # CHECK 7: Risk:Reward Ratio
         # -----------------------------------------------------------
-        risk_distance = abs(entry_price - stop_loss)
-        reward_distance = abs(take_profit - entry_price)
+        risk_distance = abs(entry - stop)
+        reward_distance = abs(target - entry)
         risk_reward = reward_distance / risk_distance if risk_distance > 0 else 0
 
         if risk_reward < self.min_rr:
-            return RiskCheckResult(
-                approved=False, adjusted_lot_size=0.0,
-                reason=f"⚠️ REJECTED: R:R ratio is {risk_reward:.2f} (minimum: {self.min_rr}). Not worth the risk.",
-                risk_pct_used=0, trades_today=len(self.trades_today),
-                max_trades_today=max_trades, current_drawdown_pct=drawdown_from_peak, equity=equity
-            )
+            return rejected(f"REJECTED: risk/reward {risk_reward:.2f} is below minimum {self.min_rr}",
+                            max_today=max_trades, drawdown=drawdown_from_peak)
 
         # -----------------------------------------------------------
         # CHECK 8: Correlated Pair Check
         # -----------------------------------------------------------
         correlated_count = self._count_correlated_positions(pair)
         if correlated_count >= self.max_correlated:
-            return RiskCheckResult(
-                approved=False, adjusted_lot_size=0.0,
-                reason=f"⚠️ REJECTED: Already {correlated_count} positions in correlated pairs to {pair}.",
-                risk_pct_used=0, trades_today=len(self.trades_today),
-                max_trades_today=max_trades, current_drawdown_pct=drawdown_from_peak, equity=equity
+            return rejected(f"REJECTED: {correlated_count} correlated positions already open for {pair}",
+                            max_today=max_trades, drawdown=drawdown_from_peak)
+
+        risk_pct = self._get_risk_pct(equity_number, pair)
+        try:
+            if instrument_snapshot is None or instrument_snapshot.instrument_id != pair:
+                raise SizingError("verified instrument metadata is required for sizing")
+            allowance = decimal_value(self.cost_allowance_per_lot, "cost allowance")
+            if allowance > 0 and self.cost_allowance_currency != instrument_snapshot.account_currency:
+                raise SizingError("cost allowance currency does not match account currency")
+            sizing = size_position(
+                instrument=instrument_snapshot, direction=direction,
+                entry_price=entry, stop_loss=stop, equity=equity_decimal,
+                risk_fraction=risk_pct, drawdown_multiplier=size_multiplier,
+                cost_allowance_per_lot=allowance,
             )
-
-        # -----------------------------------------------------------
-        # -----------------------------------------------------------
-        # ALL CHECKS PASSED → Assign EXACT lot size based on rules
-        # -----------------------------------------------------------
-        # We bypass dynamic risk math entirely and enforce strict lot sizes 
-        # as requested in the pnl_breakdown.md rules.
-        
-        if "XAG" in pair:  # Silver
-            lot_size = 0.02
-        elif "USOIL" in pair or "WTI" in pair:  # Crude Oil
-            lot_size = 0.10
-        elif "BTC" in pair:  # Bitcoin
-            lot_size = 0.03
-        else:  # Forex & Gold
-            # Dynamic Lot Size Progression based on consecutive profitable days
-            if self.consecutive_wins <= 1: # Day 1-2
-                lot_size = 0.03
-            elif self.consecutive_wins == 2: # Day 3
-                lot_size = 0.04
-            elif self.consecutive_wins == 3: # Day 4
-                lot_size = 0.05
-            elif self.consecutive_wins == 4: # Day 5
-                lot_size = 0.07
-            else: # Day 6+
-                lot_size = 0.10
-
-        # Calculate risk percentage for reporting purposes
-        risk_pct = self._get_risk_pct(equity, pair)
-        risk_amount = equity * risk_pct * size_multiplier
+            lot_size = float(sizing.volume)
+            if decimal_value(lot_size, "order volume") != sizing.volume:
+                raise SizingError("volume cannot be represented exactly by executor")
+        except (SizingError, ValueError, TypeError, AttributeError, OverflowError) as error:
+            return rejected(f"REJECTED: safe position sizing unavailable ({error})",
+                            max_today=max_trades, drawdown=drawdown_from_peak)
 
         return RiskCheckResult(
             approved=True,
             adjusted_lot_size=lot_size,
-            reason=(f"✅ APPROVED: {direction} {pair} | Lot: {lot_size} | "
-                    f"Risk: {risk_pct*100*size_multiplier:.1f}% (${risk_amount:.2f}) | "
+            reason=(f"APPROVED: {direction} {pair} | Lot: {lot_size} | "
+                    f"Risk: {risk_pct*100*size_multiplier:.1f}% "
+                    f"({instrument_snapshot.account_currency} {sizing.risk_budget:.2f}, "
+                    f"estimated loss {sizing.estimated_total_loss:.2f}) | "
                     f"R:R = 1:{risk_reward:.1f} | "
                     f"Trade {len(self.trades_today)+1}/{max_trades} today"
-                    f"{' [SIZE HALVED: daily DD warning]' if size_multiplier < 1 else ''}"),
+                    f"{' [daily drawdown reduction]' if size_multiplier < 1 else ''}"),
             risk_pct_used=risk_pct * size_multiplier,
             trades_today=len(self.trades_today),
             max_trades_today=max_trades,
             current_drawdown_pct=drawdown_from_peak,
-            equity=equity
+            equity=equity_number,
+            sizing=sizing.to_audit_dict(),
         )
 
     # -------------------------------------------------------------------
@@ -386,14 +343,8 @@ class RiskAgent:
         """
         Returns the risk percentage for a trade.
 
-        Priority:
-          1. Symbol-specific override (e.g., XAGUSD always 2%)
-          2. Capital-based rule (> $2000 → 1.5%, else 2%)
+        The threshold is denominated in the verified account currency.
         """
-        # Check for symbol-specific override first
-        if pair and pair in self.SYMBOL_RISK_OVERRIDES:
-            return self.SYMBOL_RISK_OVERRIDES[pair]
-
         # Default capital-based logic
         if equity > self.high_capital_threshold:
             return self.risk_pct_high_capital
@@ -426,6 +377,7 @@ class RiskAgent:
             "CRYPTO": ["BTCUSD", "ETHUSD"],
         }
 
+        pair = self.symbol_registry.canonical(pair)
         pair_groups = []
         for group_name, members in CORRELATION_GROUPS.items():
             if pair in members:
@@ -433,8 +385,9 @@ class RiskAgent:
 
         count = 0
         for pos in self.open_positions:
+            position_pair = self.symbol_registry.canonical(pos.pair)
             for group_name in pair_groups:
-                if pos.pair in CORRELATION_GROUPS.get(group_name, []):
+                if position_pair in CORRELATION_GROUPS.get(group_name, []):
                     count += 1
                     break
         return count
@@ -443,6 +396,7 @@ class RiskAgent:
     # State Management
     # -------------------------------------------------------------------
     def record_trade_opened(self, trade: TradeRecord):
+        trade.pair = self.symbol_registry.canonical(trade.pair)
         self.trades_today.append(trade)
         self.open_positions.append(trade)
 
@@ -481,6 +435,7 @@ class RiskAgent:
                 "reason": str
             }
         """
+        pair = self.symbol_registry.canonical(pair)
         if pair not in self.HIGH_CONVICTION_INSTRUMENTS:
             return {
                 "allow_extended_hold": False,

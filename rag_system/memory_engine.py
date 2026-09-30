@@ -49,7 +49,9 @@ class TradingRAG:
     # Distance threshold — memories beyond this are "too different" to be reliable
     MAX_RELEVANCE_DISTANCE = 1.2
 
-    def __init__(self, db_path: str = "rag_system/chroma_db"):
+    def __init__(self, db_path: str = "rag_system/chroma_db", *, symbol_registry=None):
+        from broker_mt5.symbols import SymbolRegistry
+        self.symbol_registry = symbol_registry or SymbolRegistry()
         self.db_path = Path(db_path)
         self.db_path.mkdir(parents=True, exist_ok=True)
 
@@ -105,7 +107,7 @@ class TradingRAG:
             return
 
         trade_id = trade_data.get("trade_id", f"trade_{datetime.now().timestamp()}")
-        pair      = trade_data.get("pair", "UNKNOWN")
+        pair = self.symbol_registry.canonical(trade_data.get("pair", "UNKNOWN"))
         strategy  = trade_data.get("strategy_used", "UNKNOWN")
         direction = trade_data.get("direction", "UNKNOWN")
         pnl       = float(trade_data.get("pnl", 0.0))
@@ -131,6 +133,8 @@ class TradingRAG:
             "timestamp":  datetime.now().isoformat(),
             "doc_type":   "trade"
         }
+        if trade_data.get("broker_symbol"):
+            metadata["broker_symbol"] = trade_data["broker_symbol"]
 
         try:
             # upsert handles duplicate trade_ids gracefully
@@ -153,6 +157,7 @@ class TradingRAG:
             pair:            the pair most affected (e.g., 'EURUSD')
             market_reaction: short description of what price actually did
         """
+        pair = "GLOBAL" if pair == "GLOBAL" else self.symbol_registry.canonical(pair)
         if not self.enabled or not news_items:
             return
 
@@ -224,6 +229,7 @@ class TradingRAG:
         if not self.enabled:
             return self._empty_recall("RAG disabled")
 
+        pair = self.symbol_registry.canonical(pair)
         # Minimum records needed for a statistically reliable win rate
         MIN_RECORDS = 3
         total_in_db = self.trade_memory.count()
@@ -237,8 +243,8 @@ class TradingRAG:
         )
 
         try:
-            # Filter by pair when possible to improve relevance
-            where_filter = {"pair": pair} if total_in_db >= MIN_RECORDS else None
+            # One union query preserves original IDs without rewriting legacy rows.
+            where_filter = {"$and": [self.symbol_registry.memory_filter(pair), {"strategy": strategy}]}
 
             results = self.trade_memory.query(
                 query_texts=[query],
@@ -326,6 +332,7 @@ class TradingRAG:
         try:
             results = self.news_memory.query(
                 query_texts=[query_text],
+                where=self.symbol_registry.memory_filter(pair, include_global=True),
                 n_results=min(n_results, total_in_db),
                 include=["documents", "metadatas", "distances"]
             )
@@ -395,7 +402,7 @@ class TradingRAG:
                 return None
 
             results = self.trade_memory.get(
-                where={"pair": pair},
+                where={"$and": [self.symbol_registry.memory_filter(pair), {"strategy": strategy}]},
                 include=["metadatas"]
             )
 
@@ -404,7 +411,7 @@ class TradingRAG:
 
             strat_trades = [
                 m for m in results["metadatas"]
-                if strategy.lower() in m.get("strategy", "").lower()
+                if strategy == m.get("strategy")
             ]
 
             if len(strat_trades) < 3:
